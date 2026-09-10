@@ -33,13 +33,19 @@ jobs:
 
       - name: golangci-lint
         if: steps.gomod.outputs.present == 'true'
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          # golangci-lint-action v6 doesn't support golangci-lint v2 at all; v7 is required.
+          # Our .golangci.yml is v2-schema and go.mod targets a Go version newer than the
+          # v1.x binaries are built with, so pin an explicit v2 release.
+          version: v2.13.2
 
       - name: go test
         if: steps.gomod.outputs.present == 'true'
-        run: go test ./... -race -coverprofile=coverage.out
+        # Uses the `test` Makefile target (not `go test ./...` directly) so envtest's
+        # KUBEBUILDER_ASSETS are provisioned and test/e2e (which needs a real cluster) is
+        # excluded, matching local dev workflow.
+        run: make test
 
   vuln-scan:
     runs-on: ubuntu-latest
