@@ -51,6 +51,8 @@ endif
 OPERATOR_SDK_VERSION ?= v1.37.0
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+# Image URL for the proxy binary/image (cmd/proxy).
+PROXY_IMG ?= proxy:latest
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.29.5
 
@@ -133,9 +135,17 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
+.PHONY: build-proxy
+build-proxy: fmt vet ## Build proxy binary.
+	go build -o bin/proxy cmd/proxy/main.go
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
+
+.PHONY: run-proxy
+run-proxy: fmt vet ## Run the proxy from your host.
+	go run ./cmd/proxy
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
@@ -144,9 +154,17 @@ run: manifests generate fmt vet ## Run a controller from your host.
 docker-build: ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build -t ${IMG} .
 
+.PHONY: docker-build-proxy
+docker-build-proxy: ## Build docker image with the proxy.
+	$(CONTAINER_TOOL) build -t ${PROXY_IMG} -f Dockerfile.proxy .
+
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
+
+.PHONY: docker-push-proxy
+docker-push-proxy: ## Push docker image with the proxy.
+	$(CONTAINER_TOOL) push ${PROXY_IMG}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
