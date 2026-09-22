@@ -6,6 +6,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.14.0
 	github.com/onsi/gomega v1.30.0
 	github.com/prometheus/client_golang v1.18.0
+	golang.org/x/sys v0.46.0
 	k8s.io/apimachinery v0.29.2
 	k8s.io/client-go v0.29.2
 	sigs.k8s.io/controller-runtime v0.17.3
@@ -50,7 +51,6 @@ require (
 	golang.org/x/exp v0.0.0-20220722155223-a9213eeb770e // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/term v0.44.0 // indirect
 	golang.org/x/text v0.39.0 // indirect
 	golang.org/x/time v0.11.0 // indirect
