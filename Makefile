@@ -147,6 +147,10 @@ run: manifests generate fmt vet ## Run a controller from your host.
 run-proxy: fmt vet ## Run the proxy from your host.
 	go run ./cmd/proxy
 
+.PHONY: bench-coldstart
+bench-coldstart: fmt vet ## Run the Phase 1 concurrent cold-start benchmark (see benchmark/coldstart/README.md).
+	go run ./cmd/coldstart-bench -concurrency 1,4,8,16 -o-direct
+
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
