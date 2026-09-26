@@ -1,20 +1,22 @@
 # Amphora
 
-**Sovereign GPU Fleet & Inference Economics Platform**
+**Private GPU Fleet & Inference Economics Platform**
 
-Amphora is an open-core Kubernetes operator + proxy + serving fabric that lets sovereign
-enterprises run private LLM fleets with fast, bandwidth-bound cold starts, tenancy-certified
-multi-tenant GPU packing (MIG/time-slicing), live cost & utilization observability, and an
-enforced (not just logged) EU AI Act-grade audit trail.
+Amphora is an open-core Kubernetes operator + proxy + serving fabric that lets enterprises run
+private LLM fleets with fast, bandwidth-bound cold starts, tenancy-certified multi-tenant GPU
+packing (MIG/time-slicing), live cost & utilization observability, and an enforced (not just
+logged) EU AI Act-grade audit trail.
 
-> Status: **pre-alpha / spec stage.** No operator code has landed yet — see the roadmap below.
+> Status: **early development.** Proxy PoC, Packing Scheduler, and initial reconcile-loop
+> placement logic have landed; pause-pod hijack, the admission webhook, and the storage/streaming
+> layer are still ahead — see the roadmap below.
 
 ## Why
 
-Enterprises running LLMs on private/sovereign infrastructure face three compounding problems:
-idle GPU cost from naive scale-to-zero, poor utilization from one-model-per-GPU deployment, and
-no sovereign/audited control plane that isn't a US-hosted multi-tenant SaaS. See the full
-Technical Specification for the detailed problem statement, architecture, threat model, and
+Enterprises running LLMs on private infrastructure face three compounding problems: idle GPU cost
+from naive scale-to-zero, poor utilization from one-model-per-GPU deployment, and no
+audited control plane that isn't a US-hosted multi-tenant SaaS. See the full Technical
+Specification for the detailed problem statement, architecture, threat model, and
 tenancy/isolation guarantees.
 
 ## Architecture (summary)
