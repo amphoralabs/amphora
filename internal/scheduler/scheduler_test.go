@@ -257,6 +257,44 @@ func TestReleaseFreesCapacity(t *testing.T) {
 	}
 }
 
+func TestSyncNodeRegistersUnknownNode(t *testing.T) {
+	s := newTestScheduler(t)
+
+	if err := s.SyncNode(NodeSpec{ID: testNodeID, TotalVRAMMB: 40_000, MIGCapable: true}); err != nil {
+		t.Fatalf("SyncNode() = %v, want nil", err)
+	}
+	if _, err := s.Place(PlacementRequest{Model: "m1", TenancyClass: amphorav1alpha1.TenancyTrustedMultiTenant, VRAMMB: 10_000}); err != nil {
+		t.Errorf("Place() after SyncNode = %v, want nil", err)
+	}
+}
+
+func TestSyncNodeUpdatesCapacityWithoutEvictingPlacements(t *testing.T) {
+	s := newTestScheduler(t)
+	mustRegisterNode(t, s, NodeSpec{ID: testNodeID, TotalVRAMMB: 40_000, MIGCapable: false})
+
+	if _, err := s.Place(PlacementRequest{Model: "m1", TenancyClass: amphorav1alpha1.TenancyTrustedMultiTenant, VRAMMB: 10_000, RequestedMode: PackingModeTimeSlice}); err != nil {
+		t.Fatalf("Place() = %v, want nil", err)
+	}
+
+	if err := s.SyncNode(NodeSpec{ID: testNodeID, TotalVRAMMB: 80_000, MIGCapable: true}); err != nil {
+		t.Fatalf("SyncNode() (update) = %v, want nil", err)
+	}
+
+	if _, ok := s.Placement("m1"); !ok {
+		t.Fatalf("Placement(m1) not found after SyncNode update, want preserved")
+	}
+	if _, err := s.Place(PlacementRequest{Model: "m2", TenancyClass: amphorav1alpha1.TenancyTrustedMultiTenant, VRAMMB: 10_000, RequestedMode: PackingModeMIG}); err != nil {
+		t.Errorf("Place(m2) after capacity/MIG update = %v, want nil (node is now MIG-capable with room)", err)
+	}
+}
+
+func TestSyncNodeRejectsInvalidSpec(t *testing.T) {
+	s := newTestScheduler(t)
+	if err := s.SyncNode(NodeSpec{ID: "", TotalVRAMMB: 1_000}); !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("SyncNode() = %v, want ErrInvalidRequest", err)
+	}
+}
+
 func TestPlaceRejectsInvalidRequest(t *testing.T) {
 	s := newTestScheduler(t)
 	mustRegisterNode(t, s, NodeSpec{ID: testNodeID, TotalVRAMMB: 80_000, MIGCapable: true})

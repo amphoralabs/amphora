@@ -205,6 +205,30 @@ func (s *Scheduler) RegisterNode(spec NodeSpec) error {
 	return nil
 }
 
+// SyncNode registers spec if the node is unknown, or refreshes its declared
+// capacity if already registered (e.g. relabeled). It never evicts existing
+// placements: if an update shrinks capacity below what's already allocated,
+// the node simply won't accept further placements until it grows back or
+// placements are released elsewhere. Intended for callers that periodically
+// reconcile node inventory from an external source (e.g. Node labels) and
+// want idempotent register-or-update semantics rather than RegisterNode's
+// error-on-duplicate behavior.
+func (s *Scheduler) SyncNode(spec NodeSpec) error {
+	if spec.ID == "" || spec.TotalVRAMMB <= 0 {
+		return fmt.Errorf("%w: node ID and TotalVRAMMB are required", ErrInvalidRequest)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, exists := s.nodes[spec.ID]
+	if !exists {
+		n = &nodeState{placements: make(map[string]Placement)}
+		s.nodes[spec.ID] = n
+	}
+	n.spec = spec
+	s.updateNodeMetricsLocked(n)
+	return nil
+}
+
 // RemoveNode deletes a node from the inventory. Any placements on it are
 // dropped without being reassigned elsewhere; callers are responsible for
 // re-placing affected models.
