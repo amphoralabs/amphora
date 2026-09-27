@@ -119,6 +119,12 @@ spec:
           status:
             description: ModelDeploymentStatus defines the observed state of ModelDeployment
             properties:
+              activePod:
+                description: |-
+                  ActivePod names the pod currently serving (or warming up for) this
+                  ModelDeployment, after being hijacked from a matching PausePool
+                  (Technical Specification §10). Empty until a hijack has occurred.
+                type: string
               effectivePackingMode:
                 description: |-
                   EffectivePackingMode records what the Packing Scheduler actually assigned (MIG/TimeSlice/None),

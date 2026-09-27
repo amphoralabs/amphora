@@ -94,6 +94,11 @@ type ModelDeploymentStatus struct {
 	// EffectivePackingMode records what the Packing Scheduler actually assigned (MIG/TimeSlice/None),
 	// so drift from the requested TenancyClass guarantee is observable.
 	EffectivePackingMode string `json:"effectivePackingMode,omitempty"`
+
+	// ActivePod names the pod currently serving (or warming up for) this
+	// ModelDeployment, after being hijacked from a matching PausePool
+	// (Technical Specification §10). Empty until a hijack has occurred.
+	ActivePod string `json:"activePod,omitempty"`
 }
 
 //+kubebuilder:object:root=true
