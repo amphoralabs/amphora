@@ -1,4 +1,5 @@
 ## Append samples of your project ##
 resources:
 - amphora_v1alpha1_modeldeployment.yaml
+- amphora_v1alpha1_pausepool.yaml
 #+kubebuilder:scaffold:manifestskustomizesamples
