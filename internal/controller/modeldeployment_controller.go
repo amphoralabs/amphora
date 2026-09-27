@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -45,9 +46,19 @@ const pendingRequeueInterval = 30 * time.Second
 // lists phases as non-exhaustive examples; see Technical Specification §3.2.
 const (
 	// PhaseScheduled means the Packing Scheduler assigned this deployment a
-	// node and packing mode. Pause-pod hijack (not yet implemented) still
-	// has to happen before the model is actually warm/serving.
+	// node and packing mode, but no matching PausePool has an idle pod
+	// available yet to hijack (pool cold/exhausted). The controller retries
+	// on pendingRequeueInterval; there is no cold-create fallback pod path
+	// yet (issue #12's deferred item), so a permanently empty pool leaves a
+	// deployment stuck here rather than ever reaching PhaseWarming.
 	PhaseScheduled = "Scheduled"
+	// PhaseWarming means a matching PausePool's idle pod was hijacked
+	// in place (image swapped, model annotation set, re-owned to this
+	// ModelDeployment) and status.activePod is set. This does not yet mean
+	// traffic is flowing: the eval gate (§3.2.1, not yet implemented) and
+	// the Proxy's warm-target registration (also not yet wired) both still
+	// have to happen before a deployment is genuinely "Serving".
+	PhaseWarming = "Warming"
 	// PhasePending means no node currently has capacity; the controller
 	// retries on pendingRequeueInterval.
 	PhasePending = "Pending"
@@ -70,14 +81,19 @@ type ModelDeploymentReconciler struct {
 //+kubebuilder:rbac:groups=amphora.amphora.sh,resources=modeldeployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=amphora.amphora.sh,resources=modeldeployments/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=amphora.amphora.sh,resources=modeldeployments/finalizers,verbs=update
+//+kubebuilder:rbac:groups=amphora.amphora.sh,resources=pausepools,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
 
 // Reconcile drives a ModelDeployment towards a Packing Scheduler placement:
 // it discovers GPU node capacity (§3.3), asks the scheduler to place the
-// model per its declared tenancy class (§4), and records the outcome on
-// status. Pause-pod hijacking onto the placed node is deliberately not
-// implemented yet — it depends on the pause-pod over-provisioning system,
-// a separate Phase 2 roadmap item.
+// model per its declared tenancy class (§4), then hijacks an idle pod from
+// a matching PausePool (same node/tenancyClass/packing mode, §10) onto this
+// deployment, recording the outcome on status. There is no cold-create
+// fallback yet when no PausePool has an idle pod (issue #12 follow-up), and
+// PausePool lookup is scoped to the ModelDeployment's own namespace (the
+// cross-namespace/tenant pool-sharing boundary from issue #12 is
+// unresolved, so this is deliberately conservative rather than guessed at).
 func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -143,7 +159,26 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	logger.Info("model deployment scheduled", "model", model, "node", placement.NodeID, "mode", placement.Mode)
-	return r.recordOutcome(ctx, &md, PhaseScheduled, string(placement.Mode), nil)
+
+	podName, hijacked, err := r.hijackPausePod(ctx, &md, placement)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("hijacking pause pod: %w", err)
+	}
+	if !hijacked {
+		// No idle pod available from a matching PausePool yet (pool
+		// cold/exhausted). TODO(issue #12 follow-up): fall back to a
+		// cold-created pod here instead of only retrying — not implemented
+		// yet, so a permanently empty pool leaves the deployment Scheduled
+		// indefinitely.
+		if res, statusErr := r.recordOutcome(ctx, &md, PhaseScheduled, string(placement.Mode), nil); statusErr != nil {
+			return res, statusErr
+		}
+		return ctrl.Result{RequeueAfter: pendingRequeueInterval}, nil
+	}
+
+	logger.Info("hijacked pause pod", "model", model, "pod", podName)
+	md.Status.ActivePod = podName
+	return r.recordOutcome(ctx, &md, PhaseWarming, string(placement.Mode), nil)
 }
 
 // recordOutcome persists phase/effectivePackingMode/observedGeneration onto

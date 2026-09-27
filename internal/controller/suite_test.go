@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -25,6 +26,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	nodev1 "k8s.io/api/node/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -81,6 +84,16 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
 
+	// PausePool-created pods reference the "nvidia" RuntimeClass
+	// (nvidiaRuntimeClassName); the apiserver's RuntimeClass admission
+	// plugin rejects pods referencing one that doesn't exist, same as a
+	// real cluster without the NVIDIA GPU Operator installed. Created once
+	// for the whole suite since RuntimeClass is cluster-scoped.
+	nvidiaHandler := "nvidia"
+	Expect(k8sClient.Create(context.Background(), &nodev1.RuntimeClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "nvidia"},
+		Handler:    nvidiaHandler,
+	})).To(Succeed())
 })
 
 var _ = AfterSuite(func() {

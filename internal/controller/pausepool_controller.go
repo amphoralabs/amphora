@@ -114,10 +114,12 @@ func (r *PausePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return r.recordOutcome(ctx, &pool, active, metav1.ConditionFalse, reasonCapacityUnavailable, err.Error())
 		}
 	case diff < 0:
-		// TODO(#12 follow-up, once hijack lands): scale-down must skip pods
-		// already hijacked onto a live ModelDeployment. Today every pod this
-		// reconciler owns is idle by definition, so deleting the
-		// newest-created excess pods (arbitrary but deterministic) is safe.
+		// Safe to consider every pod returned by listPoolPods a scale-down
+		// candidate: hijackPausePod (internal/controller/hijack.go) removes
+		// poolNameLabel and re-parents the owner reference the moment a pod
+		// is hijacked, so a hijacked pod no longer matches this list at all
+		// — it has fully graduated out of the pool's accounting. Deleting
+		// the newest-created excess pods is arbitrary but deterministic.
 		if err := r.shrinkPool(ctx, active, -diff); err != nil {
 			return ctrl.Result{}, fmt.Errorf("deleting excess pause pods: %w", err)
 		}
@@ -237,10 +239,18 @@ func (r *PausePoolReconciler) shrinkPool(ctx context.Context, pods []corev1.Pod,
 }
 
 // newPausePod builds an idle placeholder pod pre-bound to pool.Spec.NodeName.
-// It carries no nvidia runtime class, GPU resource request, or model-specific
-// env — those are injected at hijack time (§10 T=70ms), a step this
-// reconciler does not implement.
+// It carries no model-specific identity yet, but the RuntimeClassName and
+// the container's env shape ARE fixed here, not at hijack time: Kubernetes
+// only allows a running pod's spec.containers[*].image (plus tolerations/
+// grace-period fields) to be mutated post-creation — runtimeClassName and
+// adding/removing env entries are rejected by the apiserver. AMPHORA_MODEL
+// is therefore pre-wired as a downward-API reference to the modelAnnotation
+// annotation (initially unset): hijackPausePod (hijack.go) sets that
+// annotation — pod metadata is always mutable — then swaps the image, which
+// forces a container restart; the kubelet re-resolves the downward-API env
+// var against the pod's now-updated annotation at that restart.
 func newPausePod(pool *amphorav1alpha1.PausePool) *corev1.Pod {
+	nvidiaRuntimeClass := nvidiaRuntimeClassName
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: pool.Name + "-pause-",
@@ -253,11 +263,23 @@ func newPausePod(pool *amphorav1alpha1.PausePool) *corev1.Pod {
 			},
 		},
 		Spec: corev1.PodSpec{
-			NodeName: pool.Spec.NodeName,
+			NodeName:         pool.Spec.NodeName,
+			RuntimeClassName: &nvidiaRuntimeClass,
 			Containers: []corev1.Container{
 				{
 					Name:  "pause",
 					Image: pool.Spec.PauseImage,
+					Env: []corev1.EnvVar{
+						{Name: "AMPHORA_TENANCY_CLASS", Value: string(pool.Spec.TenancyClass)},
+						{
+							Name: "AMPHORA_MODEL",
+							ValueFrom: &corev1.EnvVarSource{
+								FieldRef: &corev1.ObjectFieldSelector{
+									FieldPath: fmt.Sprintf("metadata.annotations['%s']", modelAnnotation),
+								},
+							},
+						},
+					},
 				},
 			},
 		},
