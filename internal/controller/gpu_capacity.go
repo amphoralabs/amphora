@@ -39,6 +39,9 @@ const (
 	// (Hopper/Blackwell), required for RegulatedMultiTenant placements
 	// (§4). Defaults to false if absent.
 	NodeMIGCapableLabel = "amphora.amphora.sh/gpu-mig-capable"
+
+	// nodeMIGCapableTrue is NodeMIGCapableLabel's only truthy value.
+	nodeMIGCapableTrue = "true"
 )
 
 // defaultVRAMMB is used when spec.GPUFraction doesn't declare a MIG profile
@@ -77,7 +80,7 @@ func nodeSpecFromLabels(n corev1.Node) (scheduler.NodeSpec, error) {
 	return scheduler.NodeSpec{
 		ID:          n.Name,
 		TotalVRAMMB: vramMB,
-		MIGCapable:  n.Labels[NodeMIGCapableLabel] == "true",
+		MIGCapable:  n.Labels[NodeMIGCapableLabel] == nodeMIGCapableTrue,
 	}, nil
 }
 

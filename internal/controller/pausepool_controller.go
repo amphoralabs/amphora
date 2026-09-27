@@ -173,7 +173,7 @@ func (r *PausePoolReconciler) validateSpec(ctx context.Context, pool *amphorav1a
 		}
 		return err
 	}
-	if mode == scheduler.PackingModeMIG && node.Labels[NodeMIGCapableLabel] != "true" {
+	if mode == scheduler.PackingModeMIG && node.Labels[NodeMIGCapableLabel] != nodeMIGCapableTrue {
 		return fmt.Errorf("node %q is not MIG-capable (missing/false %s label); gpuSlice %q requires MIG", pool.Spec.NodeName, NodeMIGCapableLabel, pool.Spec.GPUSlice)
 	}
 	return nil

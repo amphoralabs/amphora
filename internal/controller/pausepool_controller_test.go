@@ -55,7 +55,7 @@ var _ = Describe("PausePool Controller", func() {
 			node := &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:   nodeName,
-					Labels: map[string]string{NodeMIGCapableLabel: "true"},
+					Labels: map[string]string{NodeMIGCapableLabel: nodeMIGCapableTrue},
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -187,7 +187,7 @@ var _ = Describe("PausePool Controller", func() {
 			node := &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:   nodeName,
-					Labels: map[string]string{NodeMIGCapableLabel: "true"},
+					Labels: map[string]string{NodeMIGCapableLabel: nodeMIGCapableTrue},
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
