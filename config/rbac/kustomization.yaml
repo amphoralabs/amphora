@@ -22,3 +22,5 @@ resources:
 # if you do not want those helpers be installed with your Project.
 - modeldeployment_editor_role.yaml
 - modeldeployment_viewer_role.yaml
+- pausepool_editor_role.yaml
+- pausepool_viewer_role.yaml

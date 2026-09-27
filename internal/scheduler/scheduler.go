@@ -326,6 +326,21 @@ func (s *Scheduler) existingPlacementLocked(model string) (Placement, bool) {
 	return Placement{}, false
 }
 
+// ResolvePackingMode reports the concrete PackingMode the §4 isolation
+// matrix implies for tenancyClass given a (possibly empty/"unspecified")
+// requested mode, or an error if the combination violates the matrix. This
+// lets callers that aren't placing a model themselves (e.g. the pause-pod
+// pool reconciler validating a PausePool's declared tenancyClass/gpuSlice
+// combination, issue #12) reuse the exact same tenancy-matrix rules Place
+// enforces rather than duplicating them, including cases where an
+// unspecified request resolves to a concrete mode with capability
+// requirements (e.g. RegulatedMultiTenant always resolves to MIG, even from
+// an empty request) — callers must use the returned mode, not their input
+// mode, for any subsequent capability checks (e.g. node MIG-capability).
+func ResolvePackingMode(tenancyClass amphorav1alpha1.TenancyClass, requestedMode PackingMode) (PackingMode, error) {
+	return resolveMode(PlacementRequest{TenancyClass: tenancyClass, RequestedMode: requestedMode})
+}
+
 func validateRequest(req PlacementRequest) error {
 	if req.Model == "" || req.VRAMMB <= 0 {
 		return fmt.Errorf("%w: model and VRAMMB are required", ErrInvalidRequest)

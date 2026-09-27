@@ -13,9 +13,22 @@ rules:
   - list
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - amphora.amphora.sh
   resources:
   - modeldeployments
+  - pausepools
   verbs:
   - create
   - delete
@@ -34,6 +47,7 @@ rules:
   - amphora.amphora.sh
   resources:
   - modeldeployments/status
+  - pausepools/status
   verbs:
   - get
   - patch

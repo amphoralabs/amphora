@@ -1,0 +1,27 @@
+# permissions for end users to edit pausepools.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: amphora
+    app.kubernetes.io/managed-by: kustomize
+  name: pausepool-editor-role
+rules:
+- apiGroups:
+  - amphora.amphora.sh
+  resources:
+  - pausepools
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - amphora.amphora.sh
+  resources:
+  - pausepools/status
+  verbs:
+  - get

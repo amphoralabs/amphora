@@ -1,0 +1,12 @@
+apiVersion: amphora.amphora.sh/v1alpha1
+kind: PausePool
+metadata:
+  labels:
+    app.kubernetes.io/name: amphora
+    app.kubernetes.io/managed-by: kustomize
+  name: pausepool-sample
+spec:
+  nodeName: gpu-node-1
+  tenancyClass: SingleTenant
+  gpuSlice: "full"
+  targetSize: 2

@@ -295,6 +295,43 @@ func TestSyncNodeRejectsInvalidSpec(t *testing.T) {
 	}
 }
 
+func TestResolvePackingModeMatchesResolveModeRules(t *testing.T) {
+	cases := []struct {
+		name     string
+		class    amphorav1alpha1.TenancyClass
+		mode     PackingMode
+		wantMode PackingMode
+		wantErr  error
+	}{
+		{"single tenant any mode dedicates", amphorav1alpha1.TenancySingleTenant, PackingModeTimeSlice, PackingModeDedicated, nil},
+		{"regulated requires mig", amphorav1alpha1.TenancyRegulatedMultiTenant, PackingModeMIG, PackingModeMIG, nil},
+		{"regulated rejects time-slice", amphorav1alpha1.TenancyRegulatedMultiTenant, PackingModeTimeSlice, "", ErrTenancyViolation},
+		{"regulated rejects dedicated", amphorav1alpha1.TenancyRegulatedMultiTenant, PackingModeDedicated, "", ErrTenancyViolation},
+		{"regulated unspecified resolves to mig", amphorav1alpha1.TenancyRegulatedMultiTenant, "", PackingModeMIG, nil},
+		{"trusted allows mig", amphorav1alpha1.TenancyTrustedMultiTenant, PackingModeMIG, PackingModeMIG, nil},
+		{"trusted rejects dedicated", amphorav1alpha1.TenancyTrustedMultiTenant, PackingModeDedicated, "", ErrTenancyViolation},
+		{"trusted unspecified defaults to mig", amphorav1alpha1.TenancyTrustedMultiTenant, "", PackingModeMIG, nil},
+		{"unknown tenancy class", amphorav1alpha1.TenancyClass("bogus"), "", "", ErrInvalidRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotMode, err := ResolvePackingMode(tc.class, tc.mode)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("ResolvePackingMode(%s, %s) = %v, want nil", tc.class, tc.mode, err)
+				}
+				if gotMode != tc.wantMode {
+					t.Fatalf("ResolvePackingMode(%s, %s) mode = %s, want %s", tc.class, tc.mode, gotMode, tc.wantMode)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ResolvePackingMode(%s, %s) = %v, want error wrapping %v", tc.class, tc.mode, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestPlaceRejectsInvalidRequest(t *testing.T) {
 	s := newTestScheduler(t)
 	mustRegisterNode(t, s, NodeSpec{ID: testNodeID, TotalVRAMMB: 80_000, MIGCapable: true})

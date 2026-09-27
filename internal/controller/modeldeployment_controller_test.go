@@ -72,7 +72,7 @@ var _ = Describe("ModelDeployment Controller", func() {
 					Name: nodeName,
 					Labels: map[string]string{
 						NodeVRAMLabel:       "80000",
-						NodeMIGCapableLabel: "true",
+						NodeMIGCapableLabel: nodeMIGCapableTrue,
 					},
 				},
 			}
