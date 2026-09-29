@@ -57,6 +57,14 @@ const (
 	// the Proxy's warm-target registration (also not yet wired) both still
 	// have to happen before a deployment is genuinely "Serving".
 	PhaseWarming = "Warming"
+	// PhaseServing means the pod passed the eval gate; traffic may flip.
+	PhaseServing = "Serving"
+	// PhaseRolledBack means the gate failed (or timed out): fail-closed, the
+	// pod was removed and the deployment will be re-placed after a backoff.
+	PhaseRolledBack = "RolledBack"
+	// PhasePromotionPaused means consecutive gate failures hit
+	// evalFailureThreshold; an operator must set approvePromotionAnnotation.
+	PhasePromotionPaused = "PromotionPaused"
 	// PhasePending means no node currently has capacity; the controller
 	// retries on pendingRequeueInterval.
 	PhasePending = "Pending"
@@ -74,6 +82,10 @@ type ModelDeploymentReconciler struct {
 	// Scheduler is the Packing Scheduler (§3.3) this reconciler places
 	// ModelDeployments onto. Required.
 	Scheduler *scheduler.Scheduler
+
+	// EvalProber runs the eval gate's probe (§3.2.1). Required: the gate
+	// fails closed, so a missing prober is an error, never a silent pass.
+	EvalProber EvalProber
 }
 
 //+kubebuilder:rbac:groups=amphora.amphora.sh,resources=modeldeployments,verbs=get;list;watch;create;update;patch;delete
@@ -81,7 +93,7 @@ type ModelDeploymentReconciler struct {
 //+kubebuilder:rbac:groups=amphora.amphora.sh,resources=modeldeployments/finalizers,verbs=update
 //+kubebuilder:rbac:groups=amphora.amphora.sh,resources=pausepools,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
-//+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives a ModelDeployment towards a Packing Scheduler placement:
 // it discovers GPU node capacity (§3.3), asks the scheduler to place the
@@ -173,8 +185,11 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	logger.Info("pod assigned", "model", model, "pod", podName)
+	if md.Status.Phase == PhaseServing && md.Status.ActivePod == podName {
+		return ctrl.Result{}, nil // already promoted; don't re-gate every reconcile
+	}
 	md.Status.ActivePod = podName
-	return r.recordOutcome(ctx, &md, PhaseWarming, string(placement.Mode), nil)
+	return r.runEvalGate(ctx, &md, placement)
 }
 
 // recordOutcome persists phase/effectivePackingMode/observedGeneration onto

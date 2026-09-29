@@ -47,6 +47,13 @@ type EvalGateSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	TimeoutMillis int32 `json:"timeoutMillis,omitempty"`
 
+	// ProbePort is the port on the serving pod the gate's health probe
+	// targets. Defaults to 8000 (vLLM's default server port).
+	// +kubebuilder:default=8000
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	ProbePort int32 `json:"probePort,omitempty"`
+
 	// CanaryConfigMapRef names a ConfigMap holding the canary prompt set and matcher config.
 	CanaryConfigMapRef string `json:"canaryConfigMapRef,omitempty"`
 }
@@ -99,6 +106,15 @@ type ModelDeploymentStatus struct {
 	// ModelDeployment, after being hijacked from a matching PausePool
 	// (Technical Specification §10). Empty until a hijack has occurred.
 	ActivePod string `json:"activePod,omitempty"`
+
+	// EvalFailures counts consecutive eval-gate failures for this
+	// deployment. At the controller's threshold, auto-promotion pauses until
+	// an operator approves (circuit breaker, §3.2.1).
+	EvalFailures int32 `json:"evalFailures,omitempty"`
+
+	// Conditions surfaces gate outcomes, e.g. QualityVerified=False with
+	// reason LatencyOnly while only the default latency probe runs.
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 //+kubebuilder:object:root=true

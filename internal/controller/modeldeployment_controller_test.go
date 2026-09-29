@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,7 +48,7 @@ func deleteAndFinalize(ctx context.Context, reconciler *ModelDeploymentReconcile
 	}
 	Expect(k8sClient.Delete(ctx, &current)).To(Succeed())
 	// envtest runs no garbage collector; remove any cold-created pod by hand.
-	_ = k8sClient.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: key.Name + "-serve", Namespace: key.Namespace}})
+	_ = k8sClient.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: key.Name + "-serve", Namespace: key.Namespace}}, client.GracePeriodSeconds(0))
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 	Expect(err).NotTo(HaveOccurred())
 }
