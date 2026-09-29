@@ -40,8 +40,11 @@ const (
 	// (§4). Defaults to false if absent.
 	NodeMIGCapableLabel = "amphora.amphora.sh/gpu-mig-capable"
 
+	// labelValueTrue is the canonical truthy label value used across
+	// controller labels (shared to satisfy goconst).
+	labelValueTrue = "true"
 	// nodeMIGCapableTrue is NodeMIGCapableLabel's only truthy value.
-	nodeMIGCapableTrue = "true"
+	nodeMIGCapableTrue = labelValueTrue
 )
 
 // defaultVRAMMB is used when spec.GPUFraction doesn't declare a MIG profile

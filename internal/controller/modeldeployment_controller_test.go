@@ -46,6 +46,8 @@ func deleteAndFinalize(ctx context.Context, reconciler *ModelDeploymentReconcile
 		return
 	}
 	Expect(k8sClient.Delete(ctx, &current)).To(Succeed())
+	// envtest runs no garbage collector; remove any cold-created pod by hand.
+	_ = k8sClient.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: key.Name + "-serve", Namespace: key.Namespace}})
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 	Expect(err).NotTo(HaveOccurred())
 }
@@ -110,7 +112,7 @@ var _ = Describe("ModelDeployment Controller", func() {
 
 			var scheduled amphorav1alpha1.ModelDeployment
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &scheduled)).To(Succeed())
-			Expect(scheduled.Status.Phase).To(Equal(PhaseScheduled))
+			Expect(scheduled.Status.Phase).To(Equal(PhaseWarming))
 			Expect(scheduled.Status.EffectivePackingMode).To(Equal(string(scheduler.PackingModeDedicated)))
 			Expect(scheduled.Status.ObservedGeneration).To(Equal(scheduled.Generation))
 

@@ -256,7 +256,7 @@ func newPausePod(pool *amphorav1alpha1.PausePool) *corev1.Pod {
 			GenerateName: pool.Name + "-pause-",
 			Namespace:    pool.Namespace,
 			Labels: map[string]string{
-				pausePodLabel:         "true",
+				pausePodLabel:         labelValueTrue,
 				pausePodTenancyLabel:  string(pool.Spec.TenancyClass),
 				pausePodGPUSliceLabel: pool.Spec.GPUSlice,
 				poolNameLabel:         pool.Name,

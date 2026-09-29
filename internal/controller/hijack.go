@@ -21,10 +21,13 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	amphorav1alpha1 "github.com/ramin-fazli/amphora/api/v1alpha1"
 	"github.com/ramin-fazli/amphora/internal/scheduler"
@@ -53,6 +56,25 @@ const nvidiaRuntimeClassName = "nvidia"
 // swap is what lets the hijacked container start up already knowing which
 // model it's serving.
 const modelAnnotation = "amphora.amphora.sh/model"
+
+// coldStartLabel marks a pod created by coldCreatePod (pool had no idle pod)
+// rather than hijacked from a PausePool, so degraded cold-starts are
+// distinguishable in audit/cost tooling (issue #12 §5).
+const coldStartLabel = "amphora.amphora.sh/cold-start"
+
+// coldCreateFallbacks counts how often a ModelDeployment had to be served by
+// a freshly created pod because no matching PausePool had an idle one. A
+// sustained non-zero rate means pools are undersized.
+var coldCreateFallbacks = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "amphora",
+	Subsystem: "controller",
+	Name:      "cold_create_fallbacks_total",
+	Help:      "ModelDeployments served by a cold-created pod because no PausePool had an idle pod, by tenancy class.",
+}, []string{"tenancy_class"})
+
+func init() {
+	ctrlmetrics.Registry.MustRegister(coldCreateFallbacks)
+}
 
 // hijackPausePod finds an idle pod from a PausePool matching placement
 // (same namespace as md, same node, tenancyClass, and resolved packing
@@ -185,4 +207,48 @@ func (r *ModelDeploymentReconciler) patchHijackedPod(ctx context.Context, md *am
 		return fmt.Errorf("patching hijacked pod: %w", err)
 	}
 	return nil
+}
+
+// coldCreatePod is the fallback when no PausePool has an idle pod: it
+// creates a pod for md directly, pre-bound to placement.NodeID (skipping the
+// kube-scheduler, same as pool pods) with the serving image, nvidia
+// RuntimeClass, and model env set at creation. It is slower than a hijack —
+// the node pays full pod-start latency — but never leaves a deployment stuck.
+//
+// Idempotent via a deterministic pod name: an AlreadyExists error (e.g. the
+// status write after a previous create failed) adopts the existing pod
+// instead of creating a duplicate.
+func (r *ModelDeploymentReconciler) coldCreatePod(ctx context.Context, md *amphorav1alpha1.ModelDeployment, placement scheduler.Placement) (string, error) {
+	runtimeClass := nvidiaRuntimeClassName
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        md.Name + "-serve",
+			Namespace:   md.Namespace,
+			Labels:      map[string]string{hijackedByLabel: md.Name, coldStartLabel: labelValueTrue},
+			Annotations: map[string]string{modelAnnotation: md.Name},
+		},
+		Spec: corev1.PodSpec{
+			NodeName:         placement.NodeID,
+			RuntimeClassName: &runtimeClass,
+			Containers: []corev1.Container{{
+				Name:  "model",
+				Image: md.Spec.Image,
+				Env: []corev1.EnvVar{
+					{Name: "AMPHORA_TENANCY_CLASS", Value: string(md.Spec.TenancyClass)},
+					{Name: "AMPHORA_MODEL", Value: md.Name},
+				},
+			}},
+		},
+	}
+	if err := controllerutil.SetControllerReference(md, pod, r.Scheme); err != nil {
+		return "", fmt.Errorf("setting ModelDeployment owner reference: %w", err)
+	}
+	if err := r.Create(ctx, pod); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return "", fmt.Errorf("creating cold-start pod: %w", err)
+		}
+		return pod.Name, nil
+	}
+	coldCreateFallbacks.WithLabelValues(string(md.Spec.TenancyClass)).Inc()
+	return pod.Name, nil
 }

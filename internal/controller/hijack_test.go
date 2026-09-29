@@ -139,7 +139,7 @@ var _ = Describe("ModelDeployment pause-pod hijack", func() {
 		})
 	})
 
-	Context("When no PausePool matches the placement", func() {
+	Context("When no PausePool has an idle pod for the placement", func() {
 		const mdName = "test-md-no-pool"
 		const nodeName = "gpu-node-no-pool"
 
@@ -177,18 +177,31 @@ var _ = Describe("ModelDeployment pause-pod hijack", func() {
 			_ = k8sClient.Delete(ctx, node)
 		})
 
-		It("stays PhaseScheduled and requeues rather than erroring", func() {
+		It("falls back to a cold-created pod and reaches PhaseWarming", func() {
 			_, err := mdReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
 			Expect(err).NotTo(HaveOccurred())
-
-			result, err := mdReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
+			_, err = mdReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(pendingRequeueInterval))
 
-			var pending amphorav1alpha1.ModelDeployment
-			Expect(k8sClient.Get(ctx, mdKey, &pending)).To(Succeed())
-			Expect(pending.Status.Phase).To(Equal(PhaseScheduled))
-			Expect(pending.Status.ActivePod).To(BeEmpty())
+			var warmed amphorav1alpha1.ModelDeployment
+			Expect(k8sClient.Get(ctx, mdKey, &warmed)).To(Succeed())
+			Expect(warmed.Status.Phase).To(Equal(PhaseWarming))
+			Expect(warmed.Status.ActivePod).To(Equal(mdName + "-serve"))
+
+			var pod corev1.Pod
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: warmed.Status.ActivePod, Namespace: testNamespace}, &pod)).To(Succeed())
+			Expect(pod.Spec.NodeName).To(Equal(nodeName))
+			Expect(pod.Spec.Containers[0].Image).To(Equal(testImage))
+			Expect(pod.Labels).To(HaveKeyWithValue(coldStartLabel, labelValueTrue))
+			Expect(pod.OwnerReferences).To(HaveLen(1))
+			Expect(pod.OwnerReferences[0].Name).To(Equal(mdName))
+
+			By("re-reconciling adopts the same pod instead of creating another")
+			_, err = mdReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
+			Expect(err).NotTo(HaveOccurred())
+			var again amphorav1alpha1.ModelDeployment
+			Expect(k8sClient.Get(ctx, mdKey, &again)).To(Succeed())
+			Expect(again.Status.ActivePod).To(Equal(warmed.Status.ActivePod))
 		})
 	})
 })
