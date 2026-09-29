@@ -247,6 +247,13 @@ func (r *ModelDeploymentReconciler) coldCreatePod(ctx context.Context, md *ampho
 		if !apierrors.IsAlreadyExists(err) {
 			return "", fmt.Errorf("creating cold-start pod: %w", err)
 		}
+		var existing corev1.Pod
+		if getErr := r.Get(ctx, client.ObjectKeyFromObject(pod), &existing); getErr != nil {
+			return "", getErr
+		}
+		if !existing.DeletionTimestamp.IsZero() {
+			return "", fmt.Errorf("cold-start pod %s still terminating; will retry", pod.Name)
+		}
 		return pod.Name, nil
 	}
 	coldCreateFallbacks.WithLabelValues(string(md.Spec.TenancyClass)).Inc()
