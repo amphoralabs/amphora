@@ -19,10 +19,9 @@ limitations under the License.
 // a warm target immediately, or holds the connection open while a cold
 // start is triggered elsewhere.
 //
-// The /admin/warm and /admin/cold endpoints stand in for the Controller's
-// not-yet-built wakeup-complete callback (see repo STATUS.md's deliberately
-// deferred reconcile-loop work) so the deferral path can be exercised
-// end-to-end without it.
+// With -sync-from-cluster the warm-target registry follows ModelDeployment
+// status (Serving == warm). The opt-in -enable-admin-endpoints /admin/warm
+// and /admin/cold simulate that locally without a cluster.
 package main
 
 import (
@@ -38,7 +37,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"k8s.io/apimachinery/pkg/runtime"
+	ctrl "sigs.k8s.io/controller-runtime"
 
+	amphorav1alpha1 "github.com/ramin-fazli/amphora/api/v1alpha1"
 	"github.com/ramin-fazli/amphora/internal/proxy"
 )
 
@@ -48,12 +50,18 @@ func main() {
 		deferralTimeout   time.Duration
 		shutdownTimeout   time.Duration
 		readHeaderTimeout time.Duration
+		syncFromCluster   bool
+		enableAdmin       bool
 	)
 	flag.StringVar(&addr, "addr", ":8080", "address to listen on for inbound inference traffic")
 	flag.DurationVar(&deferralTimeout, "deferral-timeout", proxy.DefaultDeferralTimeout,
 		"max time to hold a request open waiting for a cold model to become warm")
 	flag.DurationVar(&shutdownTimeout, "shutdown-timeout", 10*time.Second, "graceful shutdown deadline")
 	flag.DurationVar(&readHeaderTimeout, "read-header-timeout", 5*time.Second, "max time to read request headers")
+	flag.BoolVar(&syncFromCluster, "sync-from-cluster", false,
+		"watch ModelDeployments via the Kubernetes API and route only to models the controller reports Serving")
+	flag.BoolVar(&enableAdmin, "enable-admin-endpoints", false,
+		"expose unauthenticated /admin/warm and /admin/cold for local simulation; never enable alongside real traffic")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -69,14 +77,40 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.Handle("/metrics", promhttp.HandlerFor(registerer, promhttp.HandlerOpts{}))
-	mux.HandleFunc("/admin/warm", adminWarmHandler(registry, logger))
-	mux.HandleFunc("/admin/cold", adminColdHandler(registry, logger))
+	if enableAdmin {
+		// Unauthenticated and on the public listener: anyone reaching it can
+		// redirect a model's traffic. Local simulation only.
+		logger.Warn("admin endpoints enabled; do not use in production")
+		mux.HandleFunc("/admin/warm", adminWarmHandler(registry, logger))
+		mux.HandleFunc("/admin/cold", adminColdHandler(registry, logger))
+	}
 	mux.Handle("/", handler)
 
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,
+	}
+
+	syncCtx, cancelSync := context.WithCancel(context.Background())
+	defer cancelSync()
+	if syncFromCluster {
+		scheme := runtime.NewScheme()
+		if err := amphorav1alpha1.AddToScheme(scheme); err != nil {
+			logger.Error("registering scheme", "error", err)
+			os.Exit(1)
+		}
+		cfg, err := ctrl.GetConfig()
+		if err != nil {
+			logger.Error("loading kubeconfig", "error", err)
+			os.Exit(1)
+		}
+		go func() {
+			if err := proxy.SyncFromCluster(syncCtx, cfg, scheme, registry, logger); err != nil {
+				logger.Error("cluster sync failed", "error", err)
+				os.Exit(1)
+			}
+		}()
 	}
 
 	serveErr := make(chan error, 1)

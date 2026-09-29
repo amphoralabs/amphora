@@ -107,6 +107,11 @@ type ModelDeploymentStatus struct {
 	// (Technical Specification §10). Empty until a hijack has occurred.
 	ActivePod string `json:"activePod,omitempty"`
 
+	// Endpoint is the base URL (e.g. "http://10.0.0.5:8000") of the pod
+	// serving this deployment. Set only while Phase is Serving; the Proxy
+	// watches it to learn which models are warm.
+	Endpoint string `json:"endpoint,omitempty"`
+
 	// EvalFailures counts consecutive eval-gate failures for this
 	// deployment. At the controller's threshold, auto-promotion pauses until
 	// an operator approves (circuit breaker, §3.2.1).

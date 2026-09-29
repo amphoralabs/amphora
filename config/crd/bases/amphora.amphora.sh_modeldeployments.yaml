@@ -198,6 +198,12 @@ spec:
                   EffectivePackingMode records what the Packing Scheduler actually assigned (MIG/TimeSlice/None),
                   so drift from the requested TenancyClass guarantee is observable.
                 type: string
+              endpoint:
+                description: |-
+                  Endpoint is the base URL (e.g. "http://10.0.0.5:8000") of the pod
+                  serving this deployment. Set only while Phase is Serving; the Proxy
+                  watches it to learn which models are warm.
+                type: string
               evalFailures:
                 description: |-
                   EvalFailures counts consecutive eval-gate failures for this

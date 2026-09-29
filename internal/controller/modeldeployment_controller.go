@@ -202,6 +202,9 @@ func (r *ModelDeploymentReconciler) recordOutcome(ctx context.Context, md *ampho
 		log.FromContext(ctx).Info("placement not scheduled", "phase", phase, "reason", placeErr)
 	}
 	md.Status.Phase = phase
+	if phase != PhaseServing {
+		md.Status.Endpoint = "" // only a gated, Serving pod may receive traffic
+	}
 	md.Status.EffectivePackingMode = packingMode
 	md.Status.ObservedGeneration = md.Generation
 	if err := r.Status().Update(ctx, md); err != nil {
