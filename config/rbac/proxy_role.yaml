@@ -1,0 +1,18 @@
+# Read-only access for the Proxy's -sync-from-cluster mode: it only watches
+# ModelDeployment status to learn which models are Serving.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: amphora
+    app.kubernetes.io/managed-by: kustomize
+  name: proxy-role
+rules:
+- apiGroups:
+  - amphora.amphora.sh
+  resources:
+  - modeldeployments
+  verbs:
+  - get
+  - list
+  - watch

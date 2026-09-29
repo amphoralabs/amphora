@@ -111,5 +111,6 @@ func (r *ModelDeploymentReconciler) runEvalGate(ctx context.Context, md *amphora
 		Type: conditionQualityVerified, Status: metav1.ConditionFalse, Reason: reasonLatencyOnly,
 		Message: "only the default latency probe ran; output quality unverified", ObservedGeneration: md.Generation,
 	})
+	md.Status.Endpoint = fmt.Sprintf("http://%s:%d", pod.Status.PodIP, port)
 	return r.recordOutcome(ctx, md, PhaseServing, string(placement.Mode), nil)
 }
