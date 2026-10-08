@@ -54,7 +54,12 @@ type EvalGateSpec struct {
 	// +kubebuilder:validation:Maximum=65535
 	ProbePort int32 `json:"probePort,omitempty"`
 
-	// CanaryConfigMapRef names a ConfigMap holding the canary prompt set and matcher config.
+	// CanaryConfigMapRef names a ConfigMap, in the deployment's own namespace,
+	// whose "canaries.json" key is a JSON array of {prompt, expected, max_tokens?}.
+	// Honored only when Enabled is true. Each prompt is sent to the serving pod's
+	// /v1/completions (temperature 0, model = the ModelDeployment name) and must
+	// return exactly `expected` (whitespace-trimmed). TimeoutMillis bounds the
+	// health probe plus all canaries, so raise it from the 150ms default.
 	CanaryConfigMapRef string `json:"canaryConfigMapRef,omitempty"`
 }
 

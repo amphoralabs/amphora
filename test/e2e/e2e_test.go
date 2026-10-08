@@ -147,6 +147,25 @@ spec:
 `, name)
 }
 
+func modelDeploymentWithCanary(name, configMap string) string {
+	return modelDeployment(name) + fmt.Sprintf(`  evalGate:
+    enabled: true
+    timeoutMillis: 5000
+    canaryConfigMapRef: %s
+`, configMap)
+}
+
+func canaryConfigMap(name, expected string) string {
+	return fmt.Sprintf(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %s
+  namespace: default
+data:
+  canaries.json: '[{"prompt":"2+2=","expected":"%s"}]'
+`, name, expected)
+}
+
 func apply(manifest string) {
 	GinkgoHelper()
 	cmd := exec.Command(kubectlBin, verbApply, "-f", "-")
@@ -242,5 +261,39 @@ spec:
 
 		deleteAndWait(kindMD, md)
 		deleteAndWait("pausepool", "e2e-pool")
+	})
+
+	It("verifies quality with canary prompts: a matching canary is promoted with QualityVerified=True", func() {
+		const md = "e2e-canary-ok"
+		apply(canaryConfigMap("canary-ok", "4"))
+		apply(modelDeploymentWithCanary(md, "canary-ok"))
+		Eventually(func() string { return field(kindMD, md, "{.status.phase}") }, 4*time.Minute, 3*time.Second).
+			Should(Equal("Serving"))
+		Expect(field(kindMD, md, "{.status.conditions[?(@.type=='QualityVerified')].status}")).To(Equal("True"))
+		Expect(field(kindMD, md, "{.status.conditions[?(@.type=='QualityVerified')].reason}")).To(Equal("CanaryPassed"))
+		deleteAndWait(kindMD, md)
+		deleteAndWait("configmap", "canary-ok")
+	})
+
+	It("a wrong answer never reaches Serving: it rolls back and trips the circuit breaker", func() {
+		const md = "e2e-canary-bad"
+		apply(canaryConfigMap("canary-bad", "5")) // the stub answers "4"
+		apply(modelDeploymentWithCanary(md, "canary-bad"))
+
+		Eventually(func() string { return field(kindMD, md, "{.status.evalFailures}") }, 3*time.Minute, 2*time.Second).
+			ShouldNot(BeElementOf("", "0"))
+		Expect(field(kindMD, md, "{.status.conditions[?(@.type=='QualityVerified')].reason}")).To(Equal("CanaryFailed"))
+
+		By("it is never promoted to Serving, and after repeated failures promotion pauses")
+		Consistently(func() string { return field(kindMD, md, "{.status.phase}") }, 8*time.Second, 2*time.Second).
+			ShouldNot(Equal("Serving"))
+		Eventually(func() string { return field(kindMD, md, "{.status.phase}") }, 3*time.Minute, 3*time.Second).
+			Should(Equal("PromotionPaused"))
+		Expect(field(kindMD, md, "{.status.endpoint}")).To(BeEmpty())
+		out, err := viaProxy("curl-canary-bad", modelKeyPrefix+md, 5)
+		Expect(err).To(HaveOccurred(), "an unverified model must not receive traffic: %s", out)
+
+		deleteAndWait(kindMD, md)
+		deleteAndWait("configmap", "canary-bad")
 	})
 })

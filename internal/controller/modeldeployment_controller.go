@@ -86,6 +86,15 @@ type ModelDeploymentReconciler struct {
 	// EvalProber runs the eval gate's probe (§3.2.1). Required: the gate
 	// fails closed, so a missing prober is an error, never a silent pass.
 	EvalProber EvalProber
+
+	// CanaryRunner evaluates canary prompts when spec.evalGate names a
+	// canaryConfigMapRef. Required only for such deployments; absent, they
+	// fail closed rather than being promoted unverified.
+	CanaryRunner CanaryRunner
+
+	// APIReader reads the canary ConfigMap uncached (get-only RBAC). Use
+	// mgr.GetAPIReader().
+	APIReader client.Reader
 }
 
 //+kubebuilder:rbac:groups=amphora.amphora.sh,resources=modeldeployments,verbs=get;list;watch;create;update;patch;delete
@@ -93,6 +102,7 @@ type ModelDeploymentReconciler struct {
 //+kubebuilder:rbac:groups=amphora.amphora.sh,resources=modeldeployments/finalizers,verbs=update
 //+kubebuilder:rbac:groups=amphora.amphora.sh,resources=pausepools,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives a ModelDeployment towards a Packing Scheduler placement:

@@ -40,7 +40,6 @@ import (
 // timed-out probe fails closed: the pod is deleted (rollback), the failure
 // is counted, and at evalFailureThreshold promotion pauses for approval.
 func (r *ModelDeploymentReconciler) runEvalGate(ctx context.Context, md *amphorav1alpha1.ModelDeployment, placement scheduler.Placement) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
 	class := string(md.Spec.TenancyClass)
 
 	if md.Status.EvalFailures >= evalFailureThreshold {
@@ -82,32 +81,72 @@ func (r *ModelDeploymentReconciler) runEvalGate(ctx context.Context, md *amphora
 	defer cancel()
 	url := fmt.Sprintf("http://%s:%d%s", pod.Status.PodIP, port, probePath)
 
-	if err := r.EvalProber.Probe(probeCtx, url); err != nil {
-		logger.Info("eval gate failed, rolling back", "model", md.Name, "pod", pod.Name, "reason", err.Error())
-		evalGateResults.WithLabelValues("fail", class).Inc()
-		// Force-delete: a failed pod holds no state worth draining, and a
-		// lingering Terminating pod would block re-creating <md>-serve.
-		if delErr := r.Delete(ctx, &pod, client.GracePeriodSeconds(0)); delErr != nil && !apierrors.IsNotFound(delErr) {
-			return ctrl.Result{}, fmt.Errorf("rolling back pod: %w", delErr)
-		}
-		md.Status.ActivePod = ""
-		md.Status.EvalFailures++
-		res, statusErr := r.recordOutcome(ctx, md, PhaseRolledBack, string(placement.Mode), err)
-		if statusErr != nil {
-			return res, statusErr
-		}
-		return ctrl.Result{RequeueAfter: evalRetryInterval * time.Second}, nil
+	gateErr := r.EvalProber.Probe(probeCtx, url)
+	reason := ""
+	canary := md.Spec.EvalGate.Enabled && md.Spec.EvalGate.CanaryConfigMapRef != ""
+	if gateErr == nil && canary {
+		reason = reasonCanaryFailed
+		gateErr = r.runCanaries(probeCtx, md, fmt.Sprintf("http://%s:%d", pod.Status.PodIP, port))
+	}
+	if gateErr != nil {
+		return r.failGate(ctx, md, &pod, placement, gateErr, reason)
 	}
 
 	evalGateResults.WithLabelValues("pass", class).Inc()
 	md.Status.EvalFailures = 0
-	// Canary prompt/matcher evaluation is not implemented, so quality is
-	// never verified here even when spec.evalGate is configured: record that
-	// rather than imply a canary ran (§3.2.1).
-	meta.SetStatusCondition(&md.Status.Conditions, metav1.Condition{
-		Type: conditionQualityVerified, Status: metav1.ConditionFalse, Reason: reasonLatencyOnly,
-		Message: "only the default latency probe ran; output quality unverified", ObservedGeneration: md.Generation,
-	})
+	if canary {
+		meta.SetStatusCondition(&md.Status.Conditions, metav1.Condition{
+			Type: conditionQualityVerified, Status: metav1.ConditionTrue, Reason: reasonCanaryPassed,
+			Message: "canary prompts matched exactly (exact-match only)", ObservedGeneration: md.Generation,
+		})
+	} else {
+		// Without a canary set only the latency probe ran: say so instead
+		// of implying quality was checked (§3.2.1).
+		meta.SetStatusCondition(&md.Status.Conditions, metav1.Condition{
+			Type: conditionQualityVerified, Status: metav1.ConditionFalse, Reason: reasonLatencyOnly,
+			Message: "only the default latency probe ran; output quality unverified", ObservedGeneration: md.Generation,
+		})
+	}
 	md.Status.Endpoint = fmt.Sprintf("http://%s:%d", pod.Status.PodIP, port)
 	return r.recordOutcome(ctx, md, PhaseServing, string(placement.Mode), nil)
+}
+
+// runCanaries loads and runs md's canary set against the serving pod. A
+// missing, unreadable, or malformed set fails closed: a pod whose quality
+// cannot be verified is not promoted.
+func (r *ModelDeploymentReconciler) runCanaries(ctx context.Context, md *amphorav1alpha1.ModelDeployment, baseURL string) error {
+	if r.CanaryRunner == nil {
+		return errors.New("canary evaluation requires a CanaryRunner; refusing to promote without one")
+	}
+	canaries, err := r.loadCanaries(ctx, md)
+	if err != nil {
+		return err
+	}
+	return r.CanaryRunner.Run(ctx, baseURL, md.Name, canaries)
+}
+
+// failGate is the fail-closed rollback: delete the pod, count the failure,
+// and re-place after a backoff. reason is the QualityVerified reason to record
+// when the failure was a canary mismatch (empty for a plain health failure).
+func (r *ModelDeploymentReconciler) failGate(ctx context.Context, md *amphorav1alpha1.ModelDeployment, pod *corev1.Pod, placement scheduler.Placement, gateErr error, reason string) (ctrl.Result, error) {
+	log.FromContext(ctx).Info("eval gate failed, rolling back", "model", md.Name, "pod", pod.Name, "reason", gateErr.Error())
+	evalGateResults.WithLabelValues("fail", string(md.Spec.TenancyClass)).Inc()
+	// Force-delete: a failed pod holds no state worth draining, and a
+	// lingering Terminating pod would block re-creating <md>-serve.
+	if delErr := r.Delete(ctx, pod, client.GracePeriodSeconds(0)); delErr != nil && !apierrors.IsNotFound(delErr) {
+		return ctrl.Result{}, fmt.Errorf("rolling back pod: %w", delErr)
+	}
+	md.Status.ActivePod = ""
+	md.Status.EvalFailures++
+	if reason != "" {
+		meta.SetStatusCondition(&md.Status.Conditions, metav1.Condition{
+			Type: conditionQualityVerified, Status: metav1.ConditionFalse, Reason: reason,
+			Message: truncate(gateErr.Error(), 256), ObservedGeneration: md.Generation,
+		})
+	}
+	res, statusErr := r.recordOutcome(ctx, md, PhaseRolledBack, string(placement.Mode), gateErr)
+	if statusErr != nil {
+		return res, statusErr
+	}
+	return ctrl.Result{RequeueAfter: evalRetryInterval * time.Second}, nil
 }

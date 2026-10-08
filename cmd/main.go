@@ -129,7 +129,9 @@ func main() {
 		Scheme:    mgr.GetScheme(),
 		Scheduler: scheduler.NewScheduler(metrics.Registry),
 
-		EvalProber: &controller.HTTPEvalProber{},
+		EvalProber:   &controller.HTTPEvalProber{},
+		CanaryRunner: &controller.HTTPCanaryRunner{},
+		APIReader:    mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ModelDeployment")
 		os.Exit(1)
