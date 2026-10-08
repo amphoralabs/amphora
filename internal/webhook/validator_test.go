@@ -64,6 +64,7 @@ func TestModelDeploymentValidation(t *testing.T) {
 		{"regulated without allowedRegions", regulated(func(s *amphorav1alpha1.ModelDeploymentSpec) { s.AllowedRegions = nil }), errAllowedRegions},
 		{"regulated with malformed gpuFraction", regulated(func(s *amphorav1alpha1.ModelDeploymentSpec) { s.GPUFraction = "nope" }), "spec.gpuFraction"},
 		{"empty region entry", regulated(func(s *amphorav1alpha1.ModelDeploymentSpec) { s.AllowedRegions = []string{euWest1, " "} }), "allowedRegions[1] must not be empty"},
+		{"region that can never match a label value", regulated(func(s *amphorav1alpha1.ModelDeploymentSpec) { s.AllowedRegions = []string{"eu west/1"} }), "cannot be a node region label value"},
 		{"duplicate region", regulated(func(s *amphorav1alpha1.ModelDeploymentSpec) { s.AllowedRegions = []string{"a", "a"} }), "duplicate region"},
 		{"invalid canary configmap name", md(amphorav1alpha1.ModelDeploymentSpec{Image: testImage, TenancyClass: amphorav1alpha1.TenancySingleTenant,
 			EvalGate: amphorav1alpha1.EvalGateSpec{Enabled: true, CanaryConfigMapRef: "Bad_Name/../x"}}), "not a valid ConfigMap name"},
@@ -126,8 +127,8 @@ func TestModelDeploymentWarnings(t *testing.T) {
 	}
 	s = base
 	s.AllowedRegions = []string{euWest1}
-	if got := warn(s); !strings.Contains(got, "not yet enforced") {
-		t.Errorf("allowedRegions must warn that residency is not enforced against nodes: %q", got)
+	if got := warn(s); got != "" {
+		t.Errorf("allowedRegions is enforced now, so it must not warn; got %q", got)
 	}
 }
 

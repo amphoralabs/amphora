@@ -18,6 +18,7 @@ package scheduler
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -375,4 +376,90 @@ func testCounterValue(t *testing.T, cv *prometheus.CounterVec, label string) flo
 		t.Fatalf("Write() = %v", err)
 	}
 	return m.GetCounter().GetValue()
+}
+
+func TestPlaceRespectsAllowedRegions(t *testing.T) {
+	s := newTestScheduler(t)
+	mustRegisterNode(t, s, NodeSpec{ID: "us", TotalVRAMMB: 80_000, Region: "us-east-1"})
+	mustRegisterNode(t, s, NodeSpec{ID: "eu", TotalVRAMMB: 80_000, Region: "eu-west-1"})
+	mustRegisterNode(t, s, NodeSpec{ID: "unlabeled", TotalVRAMMB: 80_000})
+
+	req := func(model string, regions ...string) PlacementRequest {
+		return PlacementRequest{Model: model, TenancyClass: amphorav1alpha1.TenancyTrustedMultiTenant,
+			VRAMMB: 10_000, RequestedMode: PackingModeTimeSlice, AllowedRegions: regions}
+	}
+
+	p, err := s.Place(req("a", "eu-west-1"))
+	if err != nil || p.NodeID != "eu" {
+		t.Fatalf("Place in eu-west-1 = %+v, %v; want node eu", p, err)
+	}
+	p, err = s.Place(req("b", "us-east-1", "eu-west-1"))
+	if err != nil || (p.NodeID != "us" && p.NodeID != "eu") {
+		t.Fatalf("Place in either region = %+v, %v; want us or eu, never the unlabeled node", p, err)
+	}
+	if _, err = s.Place(req("c", "ap-south-1")); !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("Place in a region with no node = %v, want ErrNoCapacity", err)
+	}
+	if !strings.Contains(err.Error(), "ap-south-1") {
+		t.Errorf("error should name the requested regions for the operator: %v", err)
+	}
+}
+
+func TestPlaceNeverUsesUnlabeledNodeForRegionConstrainedRequest(t *testing.T) {
+	s := newTestScheduler(t)
+	mustRegisterNode(t, s, NodeSpec{ID: "unlabeled", TotalVRAMMB: 80_000})
+	_, err := s.Place(PlacementRequest{Model: "a", TenancyClass: amphorav1alpha1.TenancySingleTenant,
+		VRAMMB: 10_000, AllowedRegions: []string{"eu-west-1"}})
+	if !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("Place on an unlabeled node = %v, want ErrNoCapacity (fail closed)", err)
+	}
+	// With no constraint the same node is fine.
+	if _, err := s.Place(PlacementRequest{Model: "b", TenancyClass: amphorav1alpha1.TenancySingleTenant, VRAMMB: 10_000}); err != nil {
+		t.Fatalf("unconstrained Place on an unlabeled node = %v, want nil", err)
+	}
+}
+
+func TestPlaceDetectsExistingPlacementOutsideAllowedRegions(t *testing.T) {
+	s := newTestScheduler(t)
+	mustRegisterNode(t, s, NodeSpec{ID: "us", TotalVRAMMB: 80_000, Region: "us-east-1"})
+	req := PlacementRequest{Model: "a", TenancyClass: amphorav1alpha1.TenancySingleTenant, VRAMMB: 10_000, AllowedRegions: []string{"us-east-1"}}
+	if _, err := s.Place(req); err != nil {
+		t.Fatal(err)
+	}
+	// Idempotent while still compliant.
+	if _, err := s.Place(req); err != nil {
+		t.Fatalf("re-Place while compliant = %v", err)
+	}
+
+	req.AllowedRegions = []string{"eu-west-1"} // spec changed after placement
+	if _, err := s.Place(req); !errors.Is(err, ErrResidencyViolation) {
+		t.Fatalf("Place after allowedRegions changed = %v, want ErrResidencyViolation", err)
+	}
+
+	// After the caller releases (evicts), re-placement honors the new constraint.
+	s.Release("a")
+	if _, err := s.Place(req); !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("re-Place with no eu node = %v, want ErrNoCapacity", err)
+	}
+	mustRegisterNode(t, s, NodeSpec{ID: "eu", TotalVRAMMB: 80_000, Region: "eu-west-1"})
+	if p, err := s.Place(req); err != nil || p.NodeID != "eu" {
+		t.Fatalf("re-Place after an eu node appears = %+v, %v", p, err)
+	}
+}
+
+func TestRelabeledNodeTriggersViolationOnNextPlace(t *testing.T) {
+	s := newTestScheduler(t)
+	if err := s.SyncNode(NodeSpec{ID: "n", TotalVRAMMB: 80_000, Region: "eu-west-1"}); err != nil {
+		t.Fatal(err)
+	}
+	req := PlacementRequest{Model: "a", TenancyClass: amphorav1alpha1.TenancySingleTenant, VRAMMB: 10_000, AllowedRegions: []string{"eu-west-1"}}
+	if _, err := s.Place(req); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SyncNode(NodeSpec{ID: "n", TotalVRAMMB: 80_000, Region: "us-east-1"}); err != nil { // relabeled
+		t.Fatal(err)
+	}
+	if _, err := s.Place(req); !errors.Is(err, ErrResidencyViolation) {
+		t.Fatalf("Place after the node moved regions = %v, want ErrResidencyViolation", err)
+	}
 }

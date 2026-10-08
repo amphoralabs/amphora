@@ -40,6 +40,12 @@ const (
 	// (§4). Defaults to false if absent.
 	NodeMIGCapableLabel = "amphora.amphora.sh/gpu-mig-capable"
 
+	// RegionLabel is the standard Kubernetes node region label (set by cloud
+	// providers, or by the operator on bare metal). The Packing Scheduler uses
+	// it to enforce allowedRegions (§4.3); a node without it never matches a
+	// deployment that declares allowedRegions.
+	RegionLabel = "topology.kubernetes.io/region"
+
 	// labelValueTrue is the canonical truthy label value used across
 	// controller labels (shared to satisfy goconst).
 	labelValueTrue = "true"
@@ -84,6 +90,7 @@ func nodeSpecFromLabels(n corev1.Node) (scheduler.NodeSpec, error) {
 		ID:          n.Name,
 		TotalVRAMMB: vramMB,
 		MIGCapable:  n.Labels[NodeMIGCapableLabel] == nodeMIGCapableTrue,
+		Region:      n.Labels[RegionLabel],
 	}, nil
 }
 

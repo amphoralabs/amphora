@@ -167,8 +167,12 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		VRAMMB:             vramMB,
 		RequestedMode:      requestedMode,
 		MaxColocatedModels: md.Spec.MaxColocatedModels,
+		AllowedRegions:     md.Spec.AllowedRegions,
 	})
 	if err != nil {
+		if errors.Is(err, scheduler.ErrResidencyViolation) {
+			return r.evictForResidency(ctx, &md, model, err)
+		}
 		if errors.Is(err, scheduler.ErrNoCapacity) {
 			if res, statusErr := r.recordOutcome(ctx, &md, PhasePending, "", err); statusErr != nil {
 				return res, statusErr
@@ -229,4 +233,29 @@ func (r *ModelDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&amphorav1alpha1.ModelDeployment{}).
 		Owns(&corev1.Pod{}).
 		Complete(r)
+}
+
+// evictForResidency enforces §4.3 when a placed deployment is found outside
+// its allowedRegions (the spec changed, or its node was relabeled): the
+// placement is released and the pod deleted so no regulated workload keeps
+// running out of region, then the deployment is re-placed from scratch on the
+// next reconcile (Pending if no allowed node exists). Traffic stops because
+// status.endpoint is cleared by the non-Serving phase.
+func (r *ModelDeploymentReconciler) evictForResidency(ctx context.Context, md *amphorav1alpha1.ModelDeployment, model string, cause error) (ctrl.Result, error) {
+	log.FromContext(ctx).Info("evicting: placement violates allowedRegions", "model", model, "reason", cause.Error())
+	var owned corev1.PodList
+	if err := r.List(ctx, &owned, client.InNamespace(md.Namespace), client.MatchingLabels{hijackedByLabel: md.Name}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("listing pods to evict: %w", err)
+	}
+	for i := range owned.Items {
+		if err := r.Delete(ctx, &owned.Items[i], client.GracePeriodSeconds(0)); err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("evicting pod %s: %w", owned.Items[i].Name, err)
+		}
+	}
+	r.Scheduler.Release(model)
+	md.Status.ActivePod = ""
+	if res, err := r.recordOutcome(ctx, md, PhasePending, "", cause); err != nil {
+		return res, err
+	}
+	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
