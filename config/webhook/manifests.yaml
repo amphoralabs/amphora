@@ -1,0 +1,46 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-amphora-amphora-sh-v1alpha1-modeldeployment
+  failurePolicy: Fail
+  name: vmodeldeployment.kb.io
+  rules:
+  - apiGroups:
+    - amphora.amphora.sh
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - modeldeployments
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-amphora-amphora-sh-v1alpha1-pausepool
+  failurePolicy: Fail
+  name: vpausepool.kb.io
+  rules:
+  - apiGroups:
+    - amphora.amphora.sh
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - pausepools
+  sideEffects: None

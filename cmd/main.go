@@ -38,6 +38,7 @@ import (
 	amphorav1alpha1 "github.com/ramin-fazli/amphora/api/v1alpha1"
 	"github.com/ramin-fazli/amphora/internal/controller"
 	"github.com/ramin-fazli/amphora/internal/scheduler"
+	amphorawebhook "github.com/ramin-fazli/amphora/internal/webhook"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -142,6 +143,15 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PausePool")
 		os.Exit(1)
+	}
+	// ENABLE_WEBHOOKS=false skips the admission webhooks (e.g. `make run`
+	// locally, where no serving certificate exists). Enabled by default so a
+	// deployment is never unintentionally unvalidated.
+	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		if err = amphorawebhook.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhooks")
+			os.Exit(1)
+		}
 	}
 	//+kubebuilder:scaffold:builder
 

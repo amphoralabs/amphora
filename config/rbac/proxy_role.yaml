@@ -6,7 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/name: amphora
     app.kubernetes.io/managed-by: kustomize
-  name: proxy-role
+  name: proxy-sync-role
 rules:
 - apiGroups:
   - amphora.amphora.sh

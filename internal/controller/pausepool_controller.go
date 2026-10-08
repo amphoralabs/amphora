@@ -155,7 +155,7 @@ func activePods(pods []corev1.Pod) []corev1.Pod {
 // must satisfy the §4 isolation matrix, reusing the Packing Scheduler's own
 // rules (internal/scheduler.ValidatePackingMode) rather than duplicating them.
 func (r *PausePoolReconciler) validateSpec(ctx context.Context, pool *amphorav1alpha1.PausePool) error {
-	requestedMode, err := gpuSliceToPackingMode(pool.Spec.GPUSlice)
+	requestedMode, err := GPUSliceToPackingMode(pool.Spec.GPUSlice)
 	if err != nil {
 		return err
 	}
@@ -181,7 +181,7 @@ func (r *PausePoolReconciler) validateSpec(ctx context.Context, pool *amphorav1a
 	return nil
 }
 
-// gpuSliceToPackingMode derives the explicit packing mode a gpuSlice value
+// GPUSliceToPackingMode derives the explicit packing mode a gpuSlice value
 // requests: "full" means the whole physical GPU (PackingModeDedicated),
 // "timeslice" means a logical time-sliced share (PackingModeTimeSlice, no
 // guaranteed VRAM/fault isolation), and anything matching the MIG-profile
@@ -190,7 +190,7 @@ func (r *PausePoolReconciler) validateSpec(ctx context.Context, pool *amphorav1a
 // (never "unspecified") precisely so scheduler.ResolvePackingMode can
 // actually reject a violating combination (e.g. RegulatedMultiTenant +
 // "timeslice") instead of silently falling back to a permissive default.
-func gpuSliceToPackingMode(gpuSlice string) (scheduler.PackingMode, error) {
+func GPUSliceToPackingMode(gpuSlice string) (scheduler.PackingMode, error) {
 	switch {
 	case gpuSlice == "full":
 		return scheduler.PackingModeDedicated, nil

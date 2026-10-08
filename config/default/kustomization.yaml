@@ -18,6 +18,8 @@ resources:
 - ../crd
 - ../rbac
 - ../manager
+- ../webhook
+- ../certmanager
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 #- ../webhook
@@ -31,6 +33,7 @@ patches:
 # If you want your controller-manager to expose the /metrics
 # endpoint w/o any authn/z, please comment the following line.
 - path: manager_auth_proxy_patch.yaml
+- path: manager_webhook_patch.yaml
 
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
@@ -140,3 +143,62 @@ patches:
 #          delimiter: '.'
 #          index: 1
 #          create: true
+
+replacements:
+# Point the Certificate's dnsNames at the webhook Service (name and namespace
+# after the namePrefix/namespace transformers).
+- source:
+    kind: Service
+    name: webhook-service
+    fieldPath: metadata.name
+  targets:
+  - select:
+      kind: Certificate
+      name: serving-cert
+    fieldPaths:
+    - spec.dnsNames.0
+    - spec.dnsNames.1
+    options:
+      delimiter: '.'
+      index: 0
+- source:
+    kind: Service
+    name: webhook-service
+    fieldPath: metadata.namespace
+  targets:
+  - select:
+      kind: Certificate
+      name: serving-cert
+    fieldPaths:
+    - spec.dnsNames.0
+    - spec.dnsNames.1
+    options:
+      delimiter: '.'
+      index: 1
+# Have cert-manager inject the CA into the webhook configuration.
+- source:
+    kind: Certificate
+    name: serving-cert
+    fieldPath: metadata.namespace
+  targets:
+  - select:
+      kind: ValidatingWebhookConfiguration
+    fieldPaths:
+    - metadata.annotations.[cert-manager.io/inject-ca-from]
+    options:
+      delimiter: '/'
+      index: 0
+      create: true
+- source:
+    kind: Certificate
+    name: serving-cert
+    fieldPath: metadata.name
+  targets:
+  - select:
+      kind: ValidatingWebhookConfiguration
+    fieldPaths:
+    - metadata.annotations.[cert-manager.io/inject-ca-from]
+    options:
+      delimiter: '/'
+      index: 1
+      create: true

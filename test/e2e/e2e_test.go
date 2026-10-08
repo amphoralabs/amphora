@@ -17,6 +17,7 @@ limitations under the License.
 package e2e
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -128,8 +129,31 @@ var _ = BeforeSuite(func() {
 	kubectl(verbApply, "-f", "testdata/deploy.yaml")
 	// kind nodes advertise no GPU; declare capacity via the placeholder labels.
 	kubectl("label", "node", "--all", "--overwrite", "amphora.amphora.sh/gpu-vram-mb=80000")
+
+	// The manager pod waits in ContainerCreating until its webhook serving
+	// certificate Secret exists. The test mints its own CA (no cert-manager).
+	caPEM, certPEM, keyPEM, err := webhookCerts(
+		"webhook-service."+systemNS+".svc", "webhook-service."+systemNS+".svc.cluster.local")
+	Expect(err).NotTo(HaveOccurred())
+	apply(fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: webhook-server-cert
+  namespace: %s
+type: kubernetes.io/tls
+data:
+  tls.crt: %s
+  tls.key: %s
+`, systemNS, base64.StdEncoding.EncodeToString(certPEM), base64.StdEncoding.EncodeToString(keyPEM)))
+
 	kubectl("rollout", "status", "deploy/manager", "-n", systemNS, "--timeout=180s")
 	kubectl("rollout", "status", "deploy/proxy", "-n", systemNS, "--timeout=180s")
+
+	// Registered last, from the generated manifest, so nothing is created
+	// before the webhook server is up (failurePolicy is Fail).
+	webhookConfig, err := webhookConfigFor("../../config/webhook/manifests.yaml", "webhook-service", systemNS, caPEM)
+	Expect(err).NotTo(HaveOccurred())
+	apply(webhookConfig)
 })
 
 var _ = AfterSuite(func() {
@@ -378,5 +402,55 @@ spec:
 		deleteAndWait(kindMD, md)
 		deleteAndWait("configmap", "canary-bad2")
 		deleteAndWait("pausepool", "e2e-pool")
+	})
+
+	Context("admission webhook (real TLS, real apiserver)", func() {
+		// rejected applies a manifest and requires the apiserver to refuse it.
+		rejected := func(manifest string, wantInMessage ...string) {
+			GinkgoHelper()
+			cmd := exec.Command(kubectlBin, verbApply, "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			out, err := cmd.CombinedOutput()
+			Expect(err).To(HaveOccurred(), "expected admission to reject, but it was admitted: %s", out)
+			Expect(string(out)).To(ContainSubstring("admission webhook"))
+			for _, want := range wantInMessage {
+				Expect(string(out)).To(ContainSubstring(want))
+			}
+		}
+
+		It("rejects a RegulatedMultiTenant ModelDeployment missing gpuFraction and allowedRegions, reporting both", func() {
+			rejected(strings.Replace(modelDeployment("wh-regulated-bad"), "SingleTenant", "RegulatedMultiTenant", 1),
+				"gpuFraction is required", "allowedRegions is required")
+			_, getErr := kubectlTry(verbGet, kindMD, "wh-regulated-bad", "-n", nsDefault)
+			Expect(getErr).To(HaveOccurred(), "rejected object must not exist")
+		})
+
+		It("rejects a malformed gpuFraction", func() {
+			rejected(modelDeployment("wh-badfrac")+"  gpuFraction: half\n", "spec.gpuFraction")
+		})
+
+		It("rejects a PausePool whose slice violates the tenancy matrix", func() {
+			rejected(strings.Replace(singleTenantPool("any-node"), "SingleTenant", "RegulatedMultiTenant", 1)+"",
+				"violates tenancy isolation matrix")
+		})
+
+		It("admits a valid regulated spec with a residency warning, then rejects a breaking update", func() {
+			const name = "wh-regulated-ok"
+			valid := strings.Replace(modelDeployment(name), "SingleTenant", "RegulatedMultiTenant", 1) +
+				"  gpuFraction: 1g.10gb\n  allowedRegions: [eu-west-1]\n"
+			cmd := exec.Command(kubectlBin, verbApply, "-f", "-")
+			cmd.Stdin = strings.NewReader(valid)
+			out, err := cmd.CombinedOutput()
+			Expect(err).NotTo(HaveOccurred(), string(out))
+			Expect(string(out)).To(ContainSubstring("not yet enforced"), "admission warnings should reach the client")
+
+			By("an update that removes allowedRegions is refused")
+			patchOut, patchErr := kubectlTry("patch", kindMD, name, "-n", nsDefault, "--type=merge",
+				"-p", `{"spec":{"allowedRegions":[]}}`)
+			Expect(patchErr).To(HaveOccurred(), "update was admitted: %s", patchOut)
+			Expect(patchOut).To(ContainSubstring("allowedRegions is required"))
+
+			deleteAndWait(kindMD, name)
+		})
 	})
 })

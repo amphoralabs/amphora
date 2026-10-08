@@ -151,7 +151,7 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	vramMB, err := parseGPUFractionVRAMMB(md.Spec.GPUFraction)
+	vramMB, err := ParseGPUFractionVRAMMB(md.Spec.GPUFraction)
 	if err != nil {
 		return r.recordOutcome(ctx, &md, PhaseRejected, "", err)
 	}

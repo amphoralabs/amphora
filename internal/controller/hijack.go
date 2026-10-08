@@ -155,7 +155,7 @@ func (r *ModelDeploymentReconciler) findIdlePausePod(ctx context.Context, md *am
 		if pool.Spec.NodeName != placement.NodeID || pool.Spec.TenancyClass != md.Spec.TenancyClass {
 			continue
 		}
-		requestedMode, err := gpuSliceToPackingMode(pool.Spec.GPUSlice)
+		requestedMode, err := GPUSliceToPackingMode(pool.Spec.GPUSlice)
 		if err != nil {
 			continue // malformed pool spec; PausePoolReconciler already surfaces this on the pool's own status
 		}
