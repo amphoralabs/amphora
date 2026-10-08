@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -166,6 +167,33 @@ data:
 `, name, expected)
 }
 
+func intField(kind, name, jsonpath string) int {
+	n, _ := strconv.Atoi(field(kind, name, jsonpath))
+	return n
+}
+
+func singleTenantPool(node string) string {
+	return fmt.Sprintf(`apiVersion: amphora.amphora.sh/v1alpha1
+kind: PausePool
+metadata:
+  name: e2e-pool
+  namespace: default
+spec:
+  nodeName: %s
+  tenancyClass: SingleTenant
+  gpuSlice: full
+  targetSize: 1
+`, node)
+}
+
+// hijackedPods counts live pods owned by the named deployment (hijacked or
+// cold-created).
+func hijackedPods(md string) int {
+	out, _ := kubectlTry(verbGet, "pods", "-n", nsDefault, "-l", "amphora.amphora.sh/hijacked-by="+md,
+		"--field-selector=status.phase!=Failed", "-o", "name")
+	return len(strings.Fields(out))
+}
+
 func apply(manifest string) {
 	GinkgoHelper()
 	cmd := exec.Command(kubectlBin, verbApply, "-f", "-")
@@ -295,5 +323,60 @@ spec:
 
 		deleteAndWait(kindMD, md)
 		deleteAndWait("configmap", "canary-bad")
+	})
+
+	It("refills the pool after a hijack, and keeps serving from the hijacked pod", func() {
+		const md = "e2e-refill"
+		node := kubectl(verbGet, "nodes", "-o", "jsonpath={.items[0].metadata.name}")
+		apply(singleTenantPool(node))
+		poolSize := func() string { return field("pausepool", "e2e-pool", "{.status.currentSize}") }
+		Eventually(poolSize, time.Minute, 2*time.Second).Should(Equal("1"))
+		idle := field("pausepool", "e2e-pool", "{.status.pausePodNames[0]}")
+
+		apply(modelDeployment(md))
+		Eventually(func() string { return field(kindMD, md, "{.status.phase}") }, 4*time.Minute, 3*time.Second).
+			Should(Equal("Serving"))
+		Expect(field(kindMD, md, "{.status.activePod}")).To(Equal(idle), "the pool's idle pod should have been hijacked")
+
+		By("the pool creates a fresh idle pod to replace the hijacked one")
+		Eventually(func() string { return field("pausepool", "e2e-pool", "{.status.pausePodNames[0]}") },
+			time.Minute, 2*time.Second).ShouldNot(BeElementOf("", idle))
+		Expect(poolSize()).To(Equal("1"))
+
+		By("the hijacked pod is untouched and still serves")
+		out, err := viaProxy("curl-refill", modelKeyPrefix+md, 30)
+		Expect(err).NotTo(HaveOccurred(), out)
+		Expect(out).To(ContainSubstring("model=" + md))
+
+		deleteAndWait(kindMD, md)
+		deleteAndWait("pausepool", "e2e-pool")
+	})
+
+	It("rolls back failing hijacked pods repeatedly without orphaning pods, refilling the pool each time", func() {
+		const md = "e2e-hijack-bad"
+		node := kubectl(verbGet, "nodes", "-o", "jsonpath={.items[0].metadata.name}")
+		apply(singleTenantPool(node))
+		poolSize := func() string { return field("pausepool", "e2e-pool", "{.status.currentSize}") }
+		Eventually(poolSize, time.Minute, 2*time.Second).Should(Equal("1"))
+
+		apply(canaryConfigMap("canary-bad2", "5")) // the stub answers "4"
+		apply(modelDeploymentWithCanary(md, "canary-bad2"))
+
+		By("several fail-closed cycles happen, and the deployment never reaches Serving")
+		Eventually(func() int { return intField(kindMD, md, "{.status.evalFailures}") }, 3*time.Minute, 2*time.Second).
+			Should(BeNumerically(">=", 2))
+		Consistently(func() string { return field(kindMD, md, "{.status.phase}") }, 6*time.Second, 2*time.Second).
+			ShouldNot(Equal("Serving"))
+		Eventually(func() string { return field(kindMD, md, "{.status.phase}") }, 3*time.Minute, 3*time.Second).
+			Should(Equal("PromotionPaused"))
+
+		By("every failed cycle's pod was deleted: at most the one currently held pod remains")
+		Expect(hijackedPods(md)).To(BeNumerically("<=", 1))
+		By("and the pool was refilled after each consumption")
+		Eventually(poolSize, time.Minute, 2*time.Second).Should(Equal("1"))
+
+		deleteAndWait(kindMD, md)
+		deleteAndWait("configmap", "canary-bad2")
+		deleteAndWait("pausepool", "e2e-pool")
 	})
 })
