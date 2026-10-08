@@ -7,9 +7,12 @@ private LLM fleets with fast, bandwidth-bound cold starts, tenancy-certified mul
 packing (MIG/time-slicing), live cost & utilization observability, and an enforced (not just
 logged) EU AI Act-grade audit trail.
 
-> Status: **early development.** Proxy PoC, Packing Scheduler, and initial reconcile-loop
-> placement logic have landed; pause-pod hijack, the admission webhook, and the storage/streaming
-> layer are still ahead — see the [roadmap](#roadmap) below.
+> Status: **early development, not production-ready.** The control path works end to end on a
+> real Kubernetes cluster (admission, placement, pod assignment, quality gate, routing), but it
+> has only ever run against a GPU-less stub model: nothing here has been validated on real GPUs,
+> MIG, or large models yet, and the storage/streaming layer, residency enforcement, mTLS, and
+> the audit trail are not built. See [What works today](#what-works-today) and the
+> [roadmap](#roadmap).
 
 ## Architecture
 
@@ -17,20 +20,22 @@ logged) EU AI Act-grade audit trail.
 flowchart TB
     Client([Inference request])
 
-    subgraph Proxy["1 · Proxy — built"]
-        Registry[Warm-target registry<br/>+ connection deferral]
+    subgraph Proxy["1 · Proxy"]
+        Registry["Warm-target registry + connection deferral<br/>(follows ModelDeployment status)"]
     end
 
-    subgraph Controller["2 · Controller — built: placement only"]
-        Reconcile["ModelDeployment reconcile loop"]
+    subgraph Controller["2 · Controller + admission webhooks"]
+        Webhook["Validating webhooks<br/>(tenancy matrix §4)"]
+        Reconcile["ModelDeployment reconciler<br/>place → assign pod → eval gate"]
+        Pool["PausePool reconciler<br/>keeps idle pods warm"]
     end
 
-    subgraph Scheduler["3 · Packing Scheduler — built"]
+    subgraph Scheduler["3 · Packing Scheduler"]
         Matrix["Node capacity registry +<br/>tenancy isolation matrix (§4)"]
     end
 
-    subgraph Pod["Hot standby pod — hijack not yet automated"]
-        NV[nvidia-runtime + model process]
+    subgraph Pod["Serving pod"]
+        NV["hijacked from a PausePool,<br/>or cold-created if none idle"]
     end
 
     subgraph Storage["4 · Storage / Streaming layer — not started"]
@@ -38,26 +43,87 @@ flowchart TB
     end
 
     Client --> Proxy
-    Proxy -- "warm target exists → route now" --> Pod
-    Proxy -- "cold: wakeup event" --> Controller
-    Controller -- "PlacementRequest" --> Scheduler
-    Scheduler -- "node + packing mode" --> Controller
-    Controller -. "pause-pod hijack (planned)" .-> Pod
+    Proxy -- "model is Serving → route" --> Pod
+    Webhook -. "admits create/update" .-> Reconcile
+    Reconcile -- "PlacementRequest" --> Scheduler
+    Scheduler -- "node + packing mode" --> Reconcile
+    Reconcile -- "hijack idle pod / cold-create" --> Pod
+    Pool -- "creates idle pods" --> Pod
+    Reconcile -- "status: Serving + endpoint" --> Proxy
     Pod -. "mmap load (planned)" .-> Storage
 
     classDef built fill:#d4f7dc,stroke:#2f9e44,color:#1b4332;
     classDef planned fill:#f1f3f5,stroke:#adb5bd,color:#495057,stroke-dasharray: 4 3;
-    class Proxy,Controller,Scheduler built;
-    class Pod,Storage planned;
+    class Proxy,Controller,Scheduler,Pod built;
+    class Storage planned;
 ```
 
-A **Cost & Audit Plane** (omitted above for clarity — see the Technical Specification's full
-architecture diagram) cuts across all four components, tagging every request with
-model/tenant/GPU-time/region.
+A **Cost & Audit Plane** cuts across all four components in the Technical Specification. Only its
+first piece exists today: the proxy tags each routed request with model/tenant headers. The WORM
+audit trail, cost accounting, and region tagging are not built.
 
-Solid arrows are exercised by shipped code and tests today; dashed arrows are the planned
-pause-pod hijack and storage-streaming paths — see the status note above and the
-[roadmap](#roadmap) for what's implemented vs. designed-but-not-built.
+The Proxy and Controller are decoupled through the `ModelDeployment` status rather than a
+separate RPC channel: the controller publishes `status.endpoint` only while a deployment is
+`Serving`, and the proxy (run with `-sync-from-cluster`) watches those objects. There is no
+gRPC link, so there is also no proxy → controller wakeup path yet (nothing scales to zero).
+
+## What works today
+
+All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
+(`make test-e2e`, 10 specs, also run in CI):
+
+- **`ModelDeployment` CRD** (`amphora.amphora.sh/v1alpha1`) with an immutable `tenancyClass`
+  (`SingleTenant` / `TrustedMultiTenant` / `RegulatedMultiTenant`), `gpuFraction` (MIG profile),
+  `allowedRegions`, and `evalGate`.
+- **Admission webhooks** (`ModelDeployment`, `PausePool`) that reject at create/update: a
+  regulated spec without a MIG `gpuFraction` or `allowedRegions`, malformed MIG profiles, and
+  slice/tenancy combinations that violate the §4 matrix. They reuse the scheduler's own rules.
+  Failure policy is `Fail`.
+- **Packing Scheduler**: best-fit VRAM bin-packing that independently enforces the tenancy
+  isolation matrix at placement time (defense in depth with the webhook).
+- **Pause-pod pool**: a `PausePool` CRD keeps a fixed number of idle, node-pre-bound pods warm per
+  node/tenancy/slice. A scheduled deployment **hijacks** an idle pod in place (image swap plus a
+  model annotation read through the downward API), and the pool refills. If no pool has an idle
+  pod, the controller **cold-creates** a pod instead, counted by
+  `amphora_controller_cold_create_fallbacks_total`.
+- **Eval gate** before any traffic flip: the pod must be Ready and pass a health probe within
+  `timeoutMillis`, and, if `canaryConfigMapRef` is set, answer every canary prompt exactly as
+  expected (`/v1/completions`, exact match). It **fails closed**: a failed pod is deleted, and
+  after 3 consecutive failures promotion pauses until an operator approves. Without canaries only
+  latency is checked and `QualityVerified` stays `False`.
+- **Proxy** with connection deferral (requests for a not-yet-warm model are held open rather than
+  failed), namespace-qualified model keys (`X-Amphora-Model: <namespace>/<name>`), and routing only
+  to deployments that have passed the gate.
+
+## Known limitations
+
+- **No real-GPU validation.** The e2e uses a stub model server and maps the `nvidia`
+  RuntimeClass to `runc`. MIG, time-slicing, and vLLM behavior are untested.
+- **Residency is not enforced.** `allowedRegions` is validated for shape only; no node region
+  label convention exists and the scheduler ignores it, so regulated workloads are *not* kept
+  within their declared regions yet. The webhook warns about this on every use.
+- **Quality checking is exact-match only.** Embedding-similarity and judge-model matchers from the
+  spec are not implemented, and one shared deadline covers the health probe plus all canaries.
+- **Pools are single-namespace** and statically sized; there is no cross-namespace sharing and no
+  predictive sizing.
+- **No mTLS** between components, and the webhook's cert-manager certificate path is build-checked
+  but not exercised in CI (the e2e mints its own certificates).
+- `config/default` still references the deprecated `kube-rbac-proxy` image and is not deployed
+  in CI; the proxy image is not part of the release workflow yet.
+
+## Try it
+
+Requires Go (see `go.mod`) and, for the end-to-end suite, Docker.
+
+```bash
+make test        # unit + envtest (downloads Kubernetes control-plane binaries)
+make test-e2e    # builds images, creates a throwaway kind cluster, runs the full path, deletes it
+make lint        # golangci-lint
+make kustomize-check   # config/default must build
+```
+
+`make test-e2e` uses its own kubeconfig under `bin/` and refuses to run against any other
+cluster. `make run` runs the controller locally with webhooks disabled (no local certificate).
 
 ## Why
 
@@ -100,21 +166,24 @@ run it yourself.
 ## Roadmap
 
 - [x] **Phase 1** — Operator/CRD skeleton, proxy PoC (#4), concurrent cold-start benchmarking (#5)
-- [ ] **Phase 2** — Multi-tenant packing:
-  - [x] Packing Scheduler with tenancy-class enforcement (#6)
-  - [x] Reconciler wired to the Packing Scheduler (#7)
-  - [ ] Pause-pod over-provisioning + hijack — design not yet started, tracked once scoped
-  - [ ] [Admission webhook](https://github.com/ramin-fazli/amphora/issues/9) (tenancy +
-        residency validation) — `help wanted`
-  - [ ] [mTLS between Proxy/Controller/Scheduler](https://github.com/ramin-fazli/amphora/issues/10)
+- [x] **Phase 2** — Multi-tenant packing (software path complete; hardware-unvalidated):
+  - [x] Packing Scheduler with tenancy-class enforcement (#6) and reconciler wiring (#7)
+  - [x] Pause-pod pool (#13), hijack (#14), and cold-create fallback (#15)
+  - [x] Admission webhooks for tenancy (#21; [#9](https://github.com/amphoralabs/amphora/issues/9))
+  - [ ] Residency enforcement against nodes (§4.3): needs a node region label convention and
+        scheduler support
+  - [ ] [mTLS between Proxy/Controller/Scheduler](https://github.com/amphoralabs/amphora/issues/10)
         — `help wanted`
 - [ ] **Phase 3** — Audit trail (WORM), eval/regression gate, multi-cluster orchestrator
+  - [x] Eval gate: fail-closed health probe (#16) and exact-match canaries (#19)
+  - [ ] Other matchers (embedding similarity, judge model), WORM audit trail, multi-cluster
 - [ ] **Phase 4** — Cost-aware routing, predictive pre-warming, security review, GA hardening
+- [ ] **Not yet scheduled** — storage/streaming layer (NVMe → VRAM), real-GPU reference-hardware
+      benchmark, scale-to-zero and proxy → controller wakeup
 
 Looking for something to pick up? Browse issues labeled
-[`good first issue`](https://github.com/ramin-fazli/amphora/labels/good%20first%20issue) or
-[`help wanted`](https://github.com/ramin-fazli/amphora/labels/help%20wanted) — the two Phase 2
-items linked above are open now.
+[`good first issue`](https://github.com/amphoralabs/amphora/labels/good%20first%20issue) or
+[`help wanted`](https://github.com/amphoralabs/amphora/labels/help%20wanted).
 
 ## Contributing
 
