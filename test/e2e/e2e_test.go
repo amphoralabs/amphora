@@ -224,8 +224,8 @@ spec:
   gpuSlice: full
   targetSize: 1
 `, node))
-		Eventually(func() string { return field("pausepool", "e2e-pool", "{.status.currentSize}") }, time.Minute, 2*time.Second).
-			Should(Equal("1"))
+		poolSize := func() string { return field("pausepool", "e2e-pool", "{.status.currentSize}") }
+		Eventually(poolSize, time.Minute, 2*time.Second).Should(Equal("1"))
 
 		apply(modelDeployment(md))
 		Eventually(func() string { return field(kindMD, md, "{.status.phase}") }, 4*time.Minute, 3*time.Second).
