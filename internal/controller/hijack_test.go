@@ -136,6 +136,22 @@ var _ = Describe("ModelDeployment pause-pod hijack", func() {
 			var reconfirmed amphorav1alpha1.ModelDeployment
 			Expect(k8sClient.Get(ctx, mdKey, &reconfirmed)).To(Succeed())
 			Expect(reconfirmed.Status.ActivePod).To(Equal(warmed.Status.ActivePod))
+
+			By("a lost status.activePod (failed status write) adopts the hijacked pod instead of hijacking another")
+			reconfirmed.Status.ActivePod = ""
+			Expect(k8sClient.Status().Update(ctx, &reconfirmed)).To(Succeed())
+			_, err = mdReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
+			Expect(err).NotTo(HaveOccurred())
+			var adopted amphorav1alpha1.ModelDeployment
+			Expect(k8sClient.Get(ctx, mdKey, &adopted)).To(Succeed())
+			Expect(adopted.Status.ActivePod).To(Equal(warmed.Status.ActivePod))
+			var owned corev1.PodList
+			Expect(k8sClient.List(ctx, &owned, client.InNamespace(testNamespace), client.MatchingLabels{hijackedByLabel: mdName})).To(Succeed())
+			Expect(owned.Items).To(HaveLen(1))
+
+			By("pool pods carry a readiness probe so a freshly swapped container is not seen as Ready early")
+			Expect(pod.Spec.Containers[0].ReadinessProbe).NotTo(BeNil())
+			Expect(pod.Spec.Containers[0].ReadinessProbe.HTTPGet.Path).To(Equal(probePath))
 		})
 	})
 
@@ -193,6 +209,7 @@ var _ = Describe("ModelDeployment pause-pod hijack", func() {
 			Expect(pod.Spec.NodeName).To(Equal(nodeName))
 			Expect(pod.Spec.Containers[0].Image).To(Equal(testImage))
 			Expect(pod.Labels).To(HaveKeyWithValue(coldStartLabel, labelValueTrue))
+			Expect(pod.Spec.Containers[0].ReadinessProbe).NotTo(BeNil())
 			Expect(pod.OwnerReferences).To(HaveLen(1))
 			Expect(pod.OwnerReferences[0].Name).To(Equal(mdName))
 

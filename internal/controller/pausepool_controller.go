@@ -269,6 +269,12 @@ func newPausePod(pool *amphorav1alpha1.PausePool) *corev1.Pod {
 				{
 					Name:  "pause",
 					Image: pool.Spec.PauseImage,
+					// Idle pause pods are deliberately NotReady (the pause
+					// image serves nothing); they become Ready only after a
+					// hijack swaps in a server. Port is the default probe
+					// port: a ModelDeployment with a different
+					// evalGate.probePort cold-creates instead of hijacking.
+					ReadinessProbe: readinessProbe(defaultProbePort),
 					Env: []corev1.EnvVar{
 						{Name: "AMPHORA_TENANCY_CLASS", Value: string(pool.Spec.TenancyClass)},
 						{
