@@ -68,19 +68,23 @@ func kubectlTry(args ...string) (string, error) { return run(kubectlBin, args...
 // before the attach completes. A non-zero curl exit (e.g. timeout) is returned
 // as an error.
 func viaProxy(podName, model string, maxSeconds int) (string, error) {
-	defer func() {
-		_, _ = kubectlTry(verbDelete, kindPod, podName, "-n", nsDefault, "--ignore-not-found", "--now")
-	}()
-	if out, err := kubectlTry("run", podName, "--restart=Never", "-n", nsDefault,
-		"--image=curlimages/curl:8.10.1", "--command", "--",
-		"curl", "-sS", "-m", fmt.Sprint(maxSeconds), "-H", "X-Amphora-Model: "+model, proxyURL); err != nil {
+	return curlPod(podName, maxSeconds, "-sS", "-m", fmt.Sprint(maxSeconds), "-H", "X-Amphora-Model: "+model, proxyURL)
+}
+
+// curlPod runs curl with args in a throwaway in-cluster pod and returns its
+// stdout. A non-zero curl exit (e.g. timeout) is returned as an error.
+func curlPod(podName string, maxSeconds int, curlArgs ...string) (string, error) {
+	defer func() { _, _ = kubectlTry("delete", "pod", podName, "-n", "default", "--ignore-not-found", "--now") }()
+	runArgs := append([]string{"run", podName, "--restart=Never", "-n", "default",
+		"--image=curlimages/curl:8.10.1", "--command", "--", "curl"}, curlArgs...)
+	if out, err := kubectlTry(runArgs...); err != nil {
 		return out, err
 	}
 	deadline := time.Now().Add(time.Duration(maxSeconds+90) * time.Second)
 	for time.Now().Before(deadline) {
-		phase, _ := kubectlTry(verbGet, kindPod, podName, "-n", nsDefault, "-o", "jsonpath={.status.phase}")
+		phase, _ := kubectlTry("get", "pod", podName, "-n", "default", "-o", "jsonpath={.status.phase}")
 		if phase == "Succeeded" || phase == "Failed" {
-			logs, _ := kubectlTry("logs", podName, "-n", nsDefault)
+			logs, _ := kubectlTry("logs", podName, "-n", "default")
 			if phase == "Failed" {
 				return logs, fmt.Errorf("curl pod failed: %s", logs)
 			}
@@ -126,6 +130,10 @@ var _ = BeforeSuite(func() {
 	kubectl(verbApply, "-f", "../../config/crd/bases")
 	kubectl(verbApply, "-f", "../../config/rbac/role.yaml")
 	kubectl(verbApply, "-f", "../../config/rbac/proxy_role.yaml")
+	// Metrics auth: TokenReview/SubjectAccessReview for the manager, and the
+	// metrics-reader role that authorized scrapers bind to.
+	kubectl(verbApply, "-f", "../../config/rbac/auth_proxy_role.yaml")
+	kubectl(verbApply, "-f", "../../config/rbac/auth_proxy_client_clusterrole.yaml")
 	kubectl(verbApply, "-f", "testdata/deploy.yaml")
 	// kind nodes advertise no GPU; declare capacity via the placeholder labels.
 	// The region label is the standard topology label the scheduler enforces
@@ -504,6 +512,49 @@ spec:
 			Expect(patchOut).To(ContainSubstring("allowedRegions is required"))
 
 			deleteAndWait(kindMD, name)
+		})
+	})
+
+	Context("metrics endpoint (served by the manager over https, authn/authz enforced)", func() {
+		const metricsURL = "https://manager-metrics.amphora-system.svc:8443/metrics"
+		code := func(pod, token string) string {
+			GinkgoHelper()
+			args := []string{"-sk", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}"}
+			if token != "" {
+				args = append(args, "-H", "Authorization: Bearer "+token)
+			}
+			out, err := curlPod(pod, 20, append(args, metricsURL)...)
+			Expect(err).NotTo(HaveOccurred(), out)
+			return out
+		}
+
+		It("returns 401 anonymously, 403 without access, and 200 for an authorized caller", func() {
+			apply(`apiVersion: v1
+kind: ServiceAccount
+metadata: {name: metrics-denied, namespace: default}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: metrics-allowed, namespace: default}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: e2e-metrics-allowed}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: metrics-reader}
+subjects:
+- {kind: ServiceAccount, name: metrics-allowed, namespace: default}
+`)
+			DeferCleanup(func() {
+				_, _ = kubectlTry("delete", "clusterrolebinding", "e2e-metrics-allowed", "--ignore-not-found")
+				_, _ = kubectlTry("delete", "serviceaccount", "metrics-denied", "metrics-allowed",
+					"-n", "default", "--ignore-not-found")
+			})
+			denied := kubectl("create", "token", "metrics-denied", "-n", "default")
+			allowed := kubectl("create", "token", "metrics-allowed", "-n", "default")
+
+			Expect(code("curl-metrics-anon", "")).To(Equal("401"))
+			Expect(code("curl-metrics-denied", denied)).To(Equal("403"))
+			Expect(code("curl-metrics-ok", allowed)).To(Equal("200"))
 		})
 	})
 })

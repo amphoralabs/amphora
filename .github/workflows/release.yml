@@ -13,6 +13,22 @@ permissions:
 jobs:
   build-sign-publish:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # Both legs attach an SBOM to the same GitHub release; run them one at a
+      # time so they cannot race creating it.
+      max-parallel: 1
+      matrix:
+        include:
+          # Manager image keeps the bare repository name; the proxy gets a suffix.
+          - component: manager
+            dockerfile: Dockerfile
+            image_suffix: ""
+          - component: proxy
+            dockerfile: Dockerfile.proxy
+            image_suffix: "-proxy"
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}
     steps:
       - uses: actions/checkout@v4
 
@@ -40,8 +56,9 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           push: true
-          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
 
       - name: Install cosign
         if: steps.gomod.outputs.present == 'true'
@@ -49,18 +66,18 @@ jobs:
 
       - name: Sign image (keyless, OIDC)
         if: steps.gomod.outputs.present == 'true'
-        run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
 
       - name: Generate SBOM
         if: steps.gomod.outputs.present == 'true'
         uses: anchore/sbom-action@v0
         with:
-          image: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          image: ${{ env.IMAGE }}:${{ github.ref_name }}
           format: cyclonedx-json
-          output-file: sbom.cyclonedx.json
+          output-file: sbom-${{ matrix.component }}.cyclonedx.json
 
       - name: Attach SBOM to release
         if: steps.gomod.outputs.present == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          files: sbom.cyclonedx.json
+          files: sbom-${{ matrix.component }}.cyclonedx.json

@@ -70,7 +70,7 @@ gRPC link, so there is also no proxy → controller wakeup path yet (nothing sca
 ## What works today
 
 All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
-(`make test-e2e`, 13 specs, also run in CI):
+(`make test-e2e`, 14 specs, also run in CI):
 
 - **`ModelDeployment` CRD** (`amphora.amphora.sh/v1alpha1`) with an immutable `tenancyClass`
   (`SingleTenant` / `TrustedMultiTenant` / `RegulatedMultiTenant`), `gpuFraction` (MIG profile),
@@ -114,8 +114,9 @@ All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
   predictive sizing.
 - **No mTLS** between components, and the webhook's cert-manager certificate path is build-checked
   but not exercised in CI (the e2e mints its own certificates).
-- `config/default` still references the deprecated `kube-rbac-proxy` image and is not deployed
-  in CI; the proxy image is not part of the release workflow yet.
+- `config/default` is build-checked in CI but never deployed there (the e2e uses its own
+  manifests and certificates), and the tag-triggered release workflow (manager and proxy images,
+  signed, with SBOMs) has not been run yet.
 
 ## Try it
 
