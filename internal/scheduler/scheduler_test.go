@@ -27,7 +27,11 @@ import (
 	amphorav1alpha1 "github.com/ramin-fazli/amphora/api/v1alpha1"
 )
 
-const testNodeID = "gpu-0"
+const (
+	testNodeID = "gpu-0"
+	regionUS   = "us-east-1"
+	regionEU   = "eu-west-1"
+)
 
 func newTestScheduler(t *testing.T) *Scheduler {
 	t.Helper()
@@ -380,8 +384,8 @@ func testCounterValue(t *testing.T, cv *prometheus.CounterVec, label string) flo
 
 func TestPlaceRespectsAllowedRegions(t *testing.T) {
 	s := newTestScheduler(t)
-	mustRegisterNode(t, s, NodeSpec{ID: "us", TotalVRAMMB: 80_000, Region: "us-east-1"})
-	mustRegisterNode(t, s, NodeSpec{ID: "eu", TotalVRAMMB: 80_000, Region: "eu-west-1"})
+	mustRegisterNode(t, s, NodeSpec{ID: "us", TotalVRAMMB: 80_000, Region: regionUS})
+	mustRegisterNode(t, s, NodeSpec{ID: "eu", TotalVRAMMB: 80_000, Region: regionEU})
 	mustRegisterNode(t, s, NodeSpec{ID: "unlabeled", TotalVRAMMB: 80_000})
 
 	req := func(model string, regions ...string) PlacementRequest {
@@ -389,11 +393,11 @@ func TestPlaceRespectsAllowedRegions(t *testing.T) {
 			VRAMMB: 10_000, RequestedMode: PackingModeTimeSlice, AllowedRegions: regions}
 	}
 
-	p, err := s.Place(req("a", "eu-west-1"))
+	p, err := s.Place(req("a", regionEU))
 	if err != nil || p.NodeID != "eu" {
 		t.Fatalf("Place in eu-west-1 = %+v, %v; want node eu", p, err)
 	}
-	p, err = s.Place(req("b", "us-east-1", "eu-west-1"))
+	p, err = s.Place(req("b", regionUS, regionEU))
 	if err != nil || (p.NodeID != "us" && p.NodeID != "eu") {
 		t.Fatalf("Place in either region = %+v, %v; want us or eu, never the unlabeled node", p, err)
 	}
@@ -409,7 +413,7 @@ func TestPlaceNeverUsesUnlabeledNodeForRegionConstrainedRequest(t *testing.T) {
 	s := newTestScheduler(t)
 	mustRegisterNode(t, s, NodeSpec{ID: "unlabeled", TotalVRAMMB: 80_000})
 	_, err := s.Place(PlacementRequest{Model: "a", TenancyClass: amphorav1alpha1.TenancySingleTenant,
-		VRAMMB: 10_000, AllowedRegions: []string{"eu-west-1"}})
+		VRAMMB: 10_000, AllowedRegions: []string{regionEU}})
 	if !errors.Is(err, ErrNoCapacity) {
 		t.Fatalf("Place on an unlabeled node = %v, want ErrNoCapacity (fail closed)", err)
 	}
@@ -421,8 +425,8 @@ func TestPlaceNeverUsesUnlabeledNodeForRegionConstrainedRequest(t *testing.T) {
 
 func TestPlaceDetectsExistingPlacementOutsideAllowedRegions(t *testing.T) {
 	s := newTestScheduler(t)
-	mustRegisterNode(t, s, NodeSpec{ID: "us", TotalVRAMMB: 80_000, Region: "us-east-1"})
-	req := PlacementRequest{Model: "a", TenancyClass: amphorav1alpha1.TenancySingleTenant, VRAMMB: 10_000, AllowedRegions: []string{"us-east-1"}}
+	mustRegisterNode(t, s, NodeSpec{ID: "us", TotalVRAMMB: 80_000, Region: regionUS})
+	req := PlacementRequest{Model: "a", TenancyClass: amphorav1alpha1.TenancySingleTenant, VRAMMB: 10_000, AllowedRegions: []string{regionUS}}
 	if _, err := s.Place(req); err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +435,7 @@ func TestPlaceDetectsExistingPlacementOutsideAllowedRegions(t *testing.T) {
 		t.Fatalf("re-Place while compliant = %v", err)
 	}
 
-	req.AllowedRegions = []string{"eu-west-1"} // spec changed after placement
+	req.AllowedRegions = []string{regionEU} // spec changed after placement
 	if _, err := s.Place(req); !errors.Is(err, ErrResidencyViolation) {
 		t.Fatalf("Place after allowedRegions changed = %v, want ErrResidencyViolation", err)
 	}
@@ -441,7 +445,7 @@ func TestPlaceDetectsExistingPlacementOutsideAllowedRegions(t *testing.T) {
 	if _, err := s.Place(req); !errors.Is(err, ErrNoCapacity) {
 		t.Fatalf("re-Place with no eu node = %v, want ErrNoCapacity", err)
 	}
-	mustRegisterNode(t, s, NodeSpec{ID: "eu", TotalVRAMMB: 80_000, Region: "eu-west-1"})
+	mustRegisterNode(t, s, NodeSpec{ID: "eu", TotalVRAMMB: 80_000, Region: regionEU})
 	if p, err := s.Place(req); err != nil || p.NodeID != "eu" {
 		t.Fatalf("re-Place after an eu node appears = %+v, %v", p, err)
 	}
@@ -449,14 +453,14 @@ func TestPlaceDetectsExistingPlacementOutsideAllowedRegions(t *testing.T) {
 
 func TestRelabeledNodeTriggersViolationOnNextPlace(t *testing.T) {
 	s := newTestScheduler(t)
-	if err := s.SyncNode(NodeSpec{ID: "n", TotalVRAMMB: 80_000, Region: "eu-west-1"}); err != nil {
+	if err := s.SyncNode(NodeSpec{ID: "n", TotalVRAMMB: 80_000, Region: regionEU}); err != nil {
 		t.Fatal(err)
 	}
-	req := PlacementRequest{Model: "a", TenancyClass: amphorav1alpha1.TenancySingleTenant, VRAMMB: 10_000, AllowedRegions: []string{"eu-west-1"}}
+	req := PlacementRequest{Model: "a", TenancyClass: amphorav1alpha1.TenancySingleTenant, VRAMMB: 10_000, AllowedRegions: []string{regionEU}}
 	if _, err := s.Place(req); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SyncNode(NodeSpec{ID: "n", TotalVRAMMB: 80_000, Region: "us-east-1"}); err != nil { // relabeled
+	if err := s.SyncNode(NodeSpec{ID: "n", TotalVRAMMB: 80_000, Region: regionUS}); err != nil { // relabeled
 		t.Fatal(err)
 	}
 	if _, err := s.Place(req); !errors.Is(err, ErrResidencyViolation) {
