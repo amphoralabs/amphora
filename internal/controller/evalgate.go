@@ -23,6 +23,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
@@ -90,6 +91,20 @@ var evalGateResults = prometheus.NewCounterVec(prometheus.CounterOpts{
 
 func init() {
 	ctrlmetrics.Registry.MustRegister(evalGateResults)
+}
+
+// readinessProbe is declared on every serving-capable pod at creation (spec
+// probes are immutable afterwards). Without it a pause pod reports Ready
+// immediately, and the eval gate would probe it in the window right after a
+// hijack's image swap while the container is still restarting. With it, a
+// pod is Ready only once the container actually answers on the probe path;
+// the kubelet resets readiness when a container restarts.
+func readinessProbe(port int32) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler:     corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: probePath, Port: intstr.FromInt32(port)}},
+		PeriodSeconds:    2,
+		FailureThreshold: 1,
+	}
 }
 
 func podReady(pod *corev1.Pod) bool {

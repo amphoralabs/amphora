@@ -117,9 +117,19 @@ test: manifests generate fmt vet envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
 # Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
+# e2e runs against its own throwaway kind cluster and its own kubeconfig, so it can never touch
+# whatever cluster your ambient kubeconfig points at (the test also refuses any other context).
+# Set E2E_KEEP=1 to leave the cluster up for debugging.
+E2E_CLUSTER ?= amphora-e2e
+E2E_KUBECONFIG ?= $(LOCALBIN)/e2e-kubeconfig
+
 .PHONY: test-e2e  # Run the e2e tests against a Kind k8s instance that is spun up.
-test-e2e:
-	go test ./test/e2e/ -v -ginkgo.v
+test-e2e: kind
+	$(KIND) delete cluster --name $(E2E_CLUSTER) || true
+	$(KIND) create cluster --name $(E2E_CLUSTER) --kubeconfig $(E2E_KUBECONFIG) --wait 120s
+	KUBECONFIG=$(E2E_KUBECONFIG) E2E_KIND_CLUSTER=$(E2E_CLUSTER) KIND=$(KIND) \
+		go test ./test/e2e/ -v -ginkgo.v -timeout 20m; rc=$$?; \
+	if [ -z "$(E2E_KEEP)" ]; then $(KIND) delete cluster --name $(E2E_CLUSTER); fi; exit $$rc
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter & yamllint
@@ -229,12 +239,14 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize-$(KUSTOMIZE_VERSION)
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen-$(CONTROLLER_TOOLS_VERSION)
 ENVTEST ?= $(LOCALBIN)/setup-envtest-$(ENVTEST_VERSION)
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
+KIND ?= $(LOCALBIN)/kind-$(KIND_VERSION)
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.3.0
 CONTROLLER_TOOLS_VERSION ?= v0.22.0
 ENVTEST_VERSION ?= v0.25.0
 GOLANGCI_LINT_VERSION ?= v1.57.2
+KIND_VERSION ?= v0.33.0
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -250,6 +262,11 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
 $(ENVTEST): $(LOCALBIN)
 	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
+
+.PHONY: kind
+kind: $(KIND) ## Download kind locally if necessary.
+$(KIND): $(LOCALBIN)
+	$(call go-install-tool,$(KIND),sigs.k8s.io/kind,$(KIND_VERSION))
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.

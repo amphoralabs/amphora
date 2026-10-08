@@ -108,6 +108,24 @@ func (r *ModelDeploymentReconciler) hijackPausePod(ctx context.Context, md *amph
 		// fall through and attempt a fresh hijack below.
 	}
 
+	// Adopt a pod this deployment already hijacked (or cold-created) if
+	// status.activePod was lost, e.g. the status write after a successful
+	// hijack hit a conflict. Without this the next reconcile would hijack a
+	// second pod and orphan the first.
+	var mine corev1.PodList
+	if err := r.List(ctx, &mine, client.InNamespace(md.Namespace), client.MatchingLabels{hijackedByLabel: md.Name}); err != nil {
+		return "", false, fmt.Errorf("listing pods owned by %s: %w", md.Name, err)
+	}
+	if owned := activePods(mine.Items); len(owned) > 0 {
+		sort.Slice(owned, func(i, j int) bool { return owned[i].Name < owned[j].Name })
+		return owned[0].Name, true, nil
+	}
+
+	// A pool pod's readiness probe is fixed at the default port, so only a
+	// deployment probing that port can hijack one; others cold-create.
+	if probePortFor(md) != defaultProbePort {
+		return "", false, nil
+	}
 	pool, pod, err := r.findIdlePausePod(ctx, md, placement)
 	if err != nil {
 		return "", false, err
@@ -176,6 +194,7 @@ func (r *ModelDeploymentReconciler) patchHijackedPod(ctx context.Context, md *am
 	if len(pod.Spec.Containers) == 0 {
 		return fmt.Errorf("pause pod %s/%s has no containers to hijack", pod.Namespace, pod.Name)
 	}
+	original := pod.DeepCopy()
 	// Set before the image swap below: the kubelet resolves
 	// newPausePod's AMPHORA_MODEL downward-API env var against the pod's
 	// annotations at container (re)start, so this must already be in
@@ -203,7 +222,11 @@ func (r *ModelDeploymentReconciler) patchHijackedPod(ctx context.Context, md *am
 		return fmt.Errorf("setting ModelDeployment owner reference: %w", err)
 	}
 
-	if err := r.Update(ctx, pod); err != nil {
+	// Merge-patch rather than Update: the kubelet writes to the pod
+	// concurrently, so a whole-object Update with a stale resourceVersion
+	// conflicts. A single controller worker per object makes the lost
+	// optimistic lock safe.
+	if err := r.Patch(ctx, pod, client.MergeFrom(original)); err != nil {
 		return fmt.Errorf("patching hijacked pod: %w", err)
 	}
 	return nil
@@ -231,8 +254,9 @@ func (r *ModelDeploymentReconciler) coldCreatePod(ctx context.Context, md *ampho
 			NodeName:         placement.NodeID,
 			RuntimeClassName: &runtimeClass,
 			Containers: []corev1.Container{{
-				Name:  "model",
-				Image: md.Spec.Image,
+				Name:           "model",
+				Image:          md.Spec.Image,
+				ReadinessProbe: readinessProbe(probePortFor(md)),
 				Env: []corev1.EnvVar{
 					{Name: "AMPHORA_TENANCY_CLASS", Value: string(md.Spec.TenancyClass)},
 					{Name: "AMPHORA_MODEL", Value: md.Name},
@@ -258,4 +282,12 @@ func (r *ModelDeploymentReconciler) coldCreatePod(ctx context.Context, md *ampho
 	}
 	coldCreateFallbacks.WithLabelValues(string(md.Spec.TenancyClass)).Inc()
 	return pod.Name, nil
+}
+
+// probePortFor returns the port the eval gate and readiness probe use for md.
+func probePortFor(md *amphorav1alpha1.ModelDeployment) int32 {
+	if md.Spec.EvalGate.ProbePort != 0 {
+		return md.Spec.EvalGate.ProbePort
+	}
+	return defaultProbePort
 }

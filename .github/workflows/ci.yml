@@ -64,3 +64,18 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
+
+  e2e:
+    # Real-cluster test: builds the manager/proxy/stub-model images, creates a
+    # throwaway kind cluster, and exercises placement -> cold-create/hijack ->
+    # eval gate -> proxy routing. Uses its own kubeconfig; see `make test-e2e`.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: e2e
+        run: make test-e2e

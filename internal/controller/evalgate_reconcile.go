@@ -73,10 +73,7 @@ func (r *ModelDeploymentReconciler) runEvalGate(ctx context.Context, md *amphora
 		return ctrl.Result{}, errors.New("eval gate requires an EvalProber; refusing to promote without one")
 	}
 
-	port := md.Spec.EvalGate.ProbePort
-	if port == 0 {
-		port = defaultProbePort
-	}
+	port := probePortFor(md)
 	timeout := time.Duration(md.Spec.EvalGate.TimeoutMillis) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 150 * time.Millisecond
