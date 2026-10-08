@@ -37,6 +37,12 @@ import (
 	"github.com/ramin-fazli/amphora/internal/scheduler"
 )
 
+const (
+	mathPrompt   = "2+2="
+	otherPrompt  = "other"
+	canaryCMName = "canaries"
+)
+
 type fakeCanary struct {
 	err    error
 	called bool
@@ -116,9 +122,9 @@ var _ = Describe("ModelDeployment eval gate", func() {
 	warm := func(name string, timeoutMillis int32) {
 		warmWithGate(name, amphorav1alpha1.EvalGateSpec{TimeoutMillis: timeoutMillis}, true)
 	}
-	canaryGate := amphorav1alpha1.EvalGateSpec{TimeoutMillis: 150, Enabled: true, CanaryConfigMapRef: "canaries"}
+	canaryGate := amphorav1alpha1.EvalGateSpec{TimeoutMillis: 150, Enabled: true, CanaryConfigMapRef: canaryCMName}
 	putCanaries := func(data string) {
-		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "canaries", Namespace: testNamespace}, Data: map[string]string{canaryConfigKey: data}}
+		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: canaryCMName, Namespace: testNamespace}, Data: map[string]string{canaryConfigKey: data}}
 		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, cm) })
 	}
@@ -240,7 +246,7 @@ var _ = Describe("ModelDeployment eval gate", func() {
 
 	It("ignores canaryConfigMapRef unless evalGate.enabled, staying latency-only", func() {
 		putCanaries(`[{"prompt":"2+2=","expected":"4"}]`)
-		warmWithGate("eval-canary-disabled", amphorav1alpha1.EvalGateSpec{TimeoutMillis: 150, CanaryConfigMapRef: "canaries"}, true)
+		warmWithGate("eval-canary-disabled", amphorav1alpha1.EvalGateSpec{TimeoutMillis: 150, CanaryConfigMapRef: canaryCMName}, true)
 		markPodReady(ctx, podKey())
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
 		Expect(err).NotTo(HaveOccurred())
@@ -322,7 +328,7 @@ func TestParseCanaries(t *testing.T) {
 	}
 	many += "]"
 	bad := map[string]*corev1.ConfigMap{
-		"missing key":     cm(map[string]string{"other": "[]"}),
+		"missing key":     cm(map[string]string{otherPrompt: "[]"}),
 		"invalid json":    cm(map[string]string{canaryConfigKey: "{"}),
 		"empty set":       cm(map[string]string{canaryConfigKey: "[]"}),
 		"too many":        cm(map[string]string{canaryConfigKey: many}),
@@ -348,7 +354,7 @@ func TestHTTPCanaryRunner(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		prompt, _ := gotBody["prompt"].(string)
 		switch prompt {
-		case "2+2=":
+		case mathPrompt:
 			_, _ = w.Write([]byte(`{"choices":[{"text":"  4\n"}]}`))
 		case "empty":
 			_, _ = w.Write([]byte(`{"choices":[]}`))
@@ -364,23 +370,23 @@ func TestHTTPCanaryRunner(t *testing.T) {
 	r := &HTTPCanaryRunner{}
 	ctx := context.Background()
 
-	if err := r.Run(ctx, srv.URL, "m", []Canary{{Prompt: "2+2=", Expected: "4"}}); err != nil {
+	if err := r.Run(ctx, srv.URL, "m", []Canary{{Prompt: mathPrompt, Expected: "4"}}); err != nil {
 		t.Fatalf("matching canary (whitespace-trimmed) = %v, want nil", err)
 	}
 	if gotBody["model"] != "m" || gotBody["temperature"] != float64(0) || gotBody["max_tokens"] != float64(defaultCanaryMaxTokens) {
 		t.Errorf("request body = %v", gotBody)
 	}
-	for _, p := range []string{"other", "empty", "garbage", "500"} {
+	for _, p := range []string{otherPrompt, "empty", "garbage", "500"} {
 		if err := r.Run(ctx, srv.URL, "m", []Canary{{Prompt: p, Expected: "4"}}); err == nil {
 			t.Errorf("prompt %q: Run = nil, want error", p)
 		}
 	}
-	if err := r.Run(ctx, srv.URL, "m", []Canary{{Prompt: "2+2=", Expected: "4"}, {Prompt: "other", Expected: "4"}}); err == nil {
+	if err := r.Run(ctx, srv.URL, "m", []Canary{{Prompt: mathPrompt, Expected: "4"}, {Prompt: otherPrompt, Expected: "4"}}); err == nil {
 		t.Error("second canary mismatch must fail the whole run")
 	}
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
-	if err := r.Run(cctx, srv.URL, "m", []Canary{{Prompt: "2+2=", Expected: "4"}}); err == nil {
+	if err := r.Run(cctx, srv.URL, "m", []Canary{{Prompt: mathPrompt, Expected: "4"}}); err == nil {
 		t.Error("cancelled context: Run = nil, want error")
 	}
 }
