@@ -128,7 +128,10 @@ var _ = BeforeSuite(func() {
 	kubectl(verbApply, "-f", "../../config/rbac/proxy_role.yaml")
 	kubectl(verbApply, "-f", "testdata/deploy.yaml")
 	// kind nodes advertise no GPU; declare capacity via the placeholder labels.
-	kubectl("label", "node", "--all", "--overwrite", "amphora.amphora.sh/gpu-vram-mb=80000")
+	// The region label is the standard topology label the scheduler enforces
+	// allowedRegions against.
+	kubectl("label", "node", "--all", "--overwrite", "amphora.amphora.sh/gpu-vram-mb=80000",
+		"topology.kubernetes.io/region=eu-west-1")
 
 	// The manager pod waits in ContainerCreating until its webhook serving
 	// certificate Secret exists. The test mints its own CA (no cert-manager).
@@ -170,6 +173,10 @@ spec:
   image: amphora-stubmodel:e2e
   tenancyClass: SingleTenant
 `, name)
+}
+
+func modelDeploymentInRegions(name, regions string) string {
+	return modelDeployment(name) + "  allowedRegions: [" + regions + "]\n"
 }
 
 func modelDeploymentWithCanary(name, configMap string) string {
@@ -404,6 +411,52 @@ spec:
 		deleteAndWait("pausepool", "e2e-pool")
 	})
 
+	Context("residency: allowedRegions is enforced against the node region label", func() {
+		It("places a deployment whose allowed region matches the node, and routes to it", func() {
+			const md = "e2e-region-ok"
+			apply(modelDeploymentInRegions(md, "eu-west-1"))
+			Eventually(func() string { return field(kindMD, md, "{.status.phase}") }, 4*time.Minute, 3*time.Second).
+				Should(Equal("Serving"))
+			out, err := viaProxy("curl-region-ok", modelKeyPrefix+md, 30)
+			Expect(err).NotTo(HaveOccurred(), out)
+			Expect(out).To(ContainSubstring("model=" + md))
+			deleteAndWait(kindMD, md)
+		})
+
+		It("never places a deployment whose allowed regions exclude every node", func() {
+			const md = "e2e-region-none"
+			apply(modelDeploymentInRegions(md, "us-east-1"))
+			Eventually(func() string { return field(kindMD, md, "{.status.phase}") }, time.Minute, 2*time.Second).
+				Should(Equal("Pending"))
+			Consistently(func() string {
+				_, err := kubectlTry(verbGet, kindPod, md+"-serve", "-n", nsDefault)
+				if err != nil {
+					return "absent"
+				}
+				return "present"
+			}, 10*time.Second, 2*time.Second).Should(Equal("absent"), "no pod may exist outside the allowed regions")
+			deleteAndWait(kindMD, md)
+		})
+
+		It("evicts a running deployment when allowedRegions is changed to exclude its node, and stops routing", func() {
+			const md = "e2e-region-evict"
+			apply(modelDeploymentInRegions(md, "eu-west-1"))
+			Eventually(func() string { return field(kindMD, md, "{.status.phase}") }, 4*time.Minute, 3*time.Second).
+				Should(Equal("Serving"))
+
+			kubectl("patch", kindMD, md, "-n", nsDefault, "--type=merge", "-p", `{"spec":{"allowedRegions":["us-east-1"]}}`)
+
+			Eventually(func() string { return field(kindMD, md, "{.status.phase}") }, time.Minute, 2*time.Second).
+				Should(Equal("Pending"))
+			Expect(field(kindMD, md, "{.status.endpoint}")).To(BeEmpty())
+			_, err := kubectlTry(verbGet, kindPod, md+"-serve", "-n", nsDefault)
+			Expect(err).To(HaveOccurred(), "the out-of-region pod must have been deleted")
+			out, err := viaProxy("curl-region-evicted", modelKeyPrefix+md, 5)
+			Expect(err).To(HaveOccurred(), "traffic must stop once evicted: %s", out)
+			deleteAndWait(kindMD, md)
+		})
+	})
+
 	Context("admission webhook (real TLS, real apiserver)", func() {
 		// rejected applies a manifest and requires the apiserver to refuse it.
 		rejected := func(manifest string, wantInMessage ...string) {
@@ -434,7 +487,7 @@ spec:
 				"violates tenancy isolation matrix")
 		})
 
-		It("admits a valid regulated spec with a residency warning, then rejects a breaking update", func() {
+		It("admits a valid regulated spec, then rejects a breaking update", func() {
 			const name = "wh-regulated-ok"
 			valid := strings.Replace(modelDeployment(name), "SingleTenant", "RegulatedMultiTenant", 1) +
 				"  gpuFraction: 1g.10gb\n  allowedRegions: [eu-west-1]\n"
@@ -442,7 +495,7 @@ spec:
 			cmd.Stdin = strings.NewReader(valid)
 			out, err := cmd.CombinedOutput()
 			Expect(err).NotTo(HaveOccurred(), string(out))
-			Expect(string(out)).To(ContainSubstring("not yet enforced"), "admission warnings should reach the client")
+			Expect(string(out)).NotTo(ContainSubstring("not yet enforced"), "the old warning must be gone")
 
 			By("an update that removes allowedRegions is refused")
 			patchOut, patchErr := kubectlTry("patch", kindMD, name, "-n", nsDefault, "--type=merge",

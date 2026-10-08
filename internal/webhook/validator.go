@@ -21,9 +21,9 @@ limitations under the License.
 // depth, not a single enforcement point). The tenancy-matrix rules are the
 // scheduler's own (scheduler.ResolvePackingMode), reused rather than copied.
 //
-// Not enforceable yet: residency against actual nodes (§4.3). No node
-// region label convention exists, so allowedRegions is checked for presence
-// and shape only; the scheduler does not consult it.
+// Residency (§4.3) is enforced by the Packing Scheduler against the
+// topology.kubernetes.io/region node label; the webhook checks that
+// allowedRegions is present for regulated specs and well-formed.
 package webhook
 
 import (
@@ -129,14 +129,16 @@ func validateModelDeployment(obj runtime.Object) (admission.Warnings, error) {
 			errs = append(errs, fmt.Errorf("spec.allowedRegions[%d] must not be empty", i))
 			continue
 		}
+		// Regions are matched against the topology.kubernetes.io/region node
+		// label, so a value that is not a valid label value can never match.
+		if problems := validation.IsValidLabelValue(region); len(problems) > 0 {
+			errs = append(errs, fmt.Errorf("spec.allowedRegions[%d] %q cannot be a node region label value: %s",
+				i, region, strings.Join(problems, "; ")))
+		}
 		if _, dup := seen[region]; dup {
 			errs = append(errs, fmt.Errorf("spec.allowedRegions[%d]: duplicate region %q", i, region))
 		}
 		seen[region] = struct{}{}
-	}
-	if len(spec.AllowedRegions) > 0 {
-		warnings = append(warnings, "spec.allowedRegions is recorded but not yet enforced against node placement: "+
-			"no node region labels exist (§4.3)")
 	}
 
 	gate := spec.EvalGate

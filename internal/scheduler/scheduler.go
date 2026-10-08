@@ -76,6 +76,12 @@ var (
 	// CRD's tenancyClass field is immutable post-creation, so this should
 	// only occur on a caller bug — e.g. skipping Release after a delete).
 	ErrAlreadyPlaced = errors.New("scheduler: model already placed under a different tenancy class")
+	// ErrResidencyViolation is returned by Place when the model's existing
+	// placement sits on a node outside the request's AllowedRegions (the
+	// spec's allowedRegions changed, or the node was relabeled, after
+	// placement). The caller must evict and re-place; the scheduler never
+	// leaves a regulated workload outside its declared regions (§4.3).
+	ErrResidencyViolation = errors.New("scheduler: existing placement violates residency constraint")
 	// ErrNodeExists is returned by RegisterNode for a duplicate node ID.
 	ErrNodeExists = errors.New("scheduler: node already registered")
 	// ErrNodeNotFound is returned when referencing an unregistered node ID.
@@ -93,6 +99,10 @@ type NodeSpec struct {
 	// MIGCapable indicates the GPU supports MIG (Hopper/Blackwell). Required
 	// for any RegulatedMultiTenant placement (§4).
 	MIGCapable bool
+	// Region is the node's region (the topology.kubernetes.io/region label).
+	// A request with AllowedRegions only matches nodes whose Region is listed;
+	// a node with an empty Region never matches such a request (fail closed).
+	Region string
 }
 
 // PlacementRequest is a placement ask derived from a ModelDeployment's spec.
@@ -111,6 +121,9 @@ type PlacementRequest struct {
 	// this one. Zero means no additional constraint beyond node capacity
 	// (mirrors the CRD field's unset/omitempty default).
 	MaxColocatedModels int32
+	// AllowedRegions restricts placement to nodes in these regions (data
+	// residency, §4.3). Empty means no residency constraint.
+	AllowedRegions []string
 }
 
 // Placement is the scheduler's decision for a PlacementRequest.
@@ -155,6 +168,9 @@ type Scheduler struct {
 	vramUsedRatio     *prometheus.GaugeVec
 	colocatedModels   *prometheus.GaugeVec
 	violationsBlocked *prometheus.CounterVec
+	// residencyViolations counts existing placements found outside their
+	// allowed regions (each triggers an eviction by the caller).
+	residencyViolations *prometheus.CounterVec
 }
 
 // NewScheduler returns an empty Scheduler. Pass a dedicated
@@ -182,9 +198,15 @@ func NewScheduler(reg prometheus.Registerer) *Scheduler {
 			Name:      "tenancy_class_violations_blocked_total",
 			Help:      "Placements rejected for violating the §4 tenancy isolation matrix, by tenancy class.",
 		}, []string{"tenancy_class"}),
+		residencyViolations: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "residency_violations_detected_total",
+			Help:      "Existing placements found outside their allowedRegions (spec changed or node relabeled), by tenancy class.",
+		}, []string{"tenancy_class"}),
 	}
 	if reg != nil {
-		reg.MustRegister(s.vramUsedRatio, s.colocatedModels, s.violationsBlocked)
+		reg.MustRegister(s.vramUsedRatio, s.colocatedModels, s.violationsBlocked, s.residencyViolations)
 	}
 	return s
 }
@@ -294,6 +316,11 @@ func (s *Scheduler) Place(req PlacementRequest) (Placement, error) {
 	if existing, ok := s.existingPlacementLocked(req.Model); ok {
 		if s.tenancyClass[req.Model] != req.TenancyClass {
 			return Placement{}, fmt.Errorf("%w: %s placed as %s, requested %s", ErrAlreadyPlaced, req.Model, s.tenancyClass[req.Model], req.TenancyClass)
+		}
+		if n, found := s.nodes[existing.NodeID]; found && !regionAllowed(n.spec.Region, req.AllowedRegions) {
+			s.residencyViolations.WithLabelValues(string(req.TenancyClass)).Inc()
+			return Placement{}, fmt.Errorf("%w: %s is on node %s in region %q, allowed %v",
+				ErrResidencyViolation, req.Model, existing.NodeID, n.spec.Region, req.AllowedRegions)
 		}
 		return existing, nil
 	}
@@ -412,7 +439,8 @@ func (s *Scheduler) selectNodeLocked(req PlacementRequest, mode PackingMode) (*n
 		}
 	}
 	if best == nil {
-		return nil, fmt.Errorf("%w: model=%s tenancyClass=%s mode=%s vramMB=%d", ErrNoCapacity, req.Model, req.TenancyClass, mode, req.VRAMMB)
+		return nil, fmt.Errorf("%w: model=%s tenancyClass=%s mode=%s vramMB=%d allowedRegions=%v",
+			ErrNoCapacity, req.Model, req.TenancyClass, mode, req.VRAMMB, req.AllowedRegions)
 	}
 	return best, nil
 }
@@ -421,6 +449,9 @@ func (s *Scheduler) selectNodeLocked(req PlacementRequest, mode PackingMode) (*n
 // violating §4's trust-boundary/isolation rules or MaxColocatedModels.
 // Caller must hold s.mu.
 func (s *Scheduler) compatibleLocked(n *nodeState, req PlacementRequest, mode PackingMode) bool {
+	if !regionAllowed(n.spec.Region, req.AllowedRegions) {
+		return false
+	}
 	if mode == PackingModeMIG && !n.spec.MIGCapable {
 		return false
 	}
@@ -454,6 +485,25 @@ func (s *Scheduler) compatibleLocked(n *nodeState, req PlacementRequest, mode Pa
 	}
 
 	return true
+}
+
+// regionAllowed reports whether a node in region satisfies allowed. No
+// constraint (empty allowed) admits any node; otherwise the node must carry a
+// region label that is listed, so an unlabeled node is never assumed to be
+// somewhere acceptable.
+func regionAllowed(region string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	if region == "" {
+		return false
+	}
+	for _, a := range allowed {
+		if a == region {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Scheduler) updateNodeMetricsLocked(n *nodeState) {
