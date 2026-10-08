@@ -51,9 +51,10 @@ spec:
       - name: manager
         image: amphora-manager:e2e
         imagePullPolicy: IfNotPresent
-        args: ["--leader-elect=false"]
+        args: ["--leader-elect=false", "--metrics-bind-address=:8443", "--metrics-secure"]
         ports:
         - containerPort: 9443
+        - containerPort: 8443
         volumeMounts:
         - name: webhook-cert
           mountPath: /tmp/k8s-webhook-server/serving-certs
@@ -75,6 +76,32 @@ spec:
   ports:
   - port: 443
     targetPort: 9443
+---
+# The manager authenticates/authorizes metrics callers itself (TokenReview and
+# SubjectAccessReview), so its ServiceAccount needs these create permissions.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: e2e-manager-auth
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: proxy-role
+subjects:
+- kind: ServiceAccount
+  name: manager
+  namespace: amphora-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: manager-metrics
+  namespace: amphora-system
+spec:
+  selector: {app: manager}
+  ports:
+  - port: 8443
+    targetPort: 8443
 ---
 apiVersion: v1
 kind: ServiceAccount
