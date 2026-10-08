@@ -40,6 +40,10 @@ jobs:
           # v1.x binaries are built with, so pin an explicit v2 release.
           version: v2.13.2
 
+      - name: kustomize build (config/default must stay deployable)
+        if: steps.gomod.outputs.present == 'true'
+        run: make kustomize-check
+
       - name: go test
         if: steps.gomod.outputs.present == 'true'
         # Uses the `test` Makefile target (not `go test ./...` directly) so envtest's

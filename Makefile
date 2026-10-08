@@ -127,8 +127,10 @@ E2E_KUBECONFIG ?= $(LOCALBIN)/e2e-kubeconfig
 test-e2e: kind
 	$(KIND) delete cluster --name $(E2E_CLUSTER) || true
 	$(KIND) create cluster --name $(E2E_CLUSTER) --kubeconfig $(E2E_KUBECONFIG) --wait 120s
+	# SHELLFLAGS is -e, so a failing `go test` must not abort the line before the cluster is deleted.
+	rc=0; \
 	KUBECONFIG=$(E2E_KUBECONFIG) E2E_KIND_CLUSTER=$(E2E_CLUSTER) KIND=$(KIND) \
-		go test ./test/e2e/ -v -ginkgo.v -timeout 20m; rc=$$?; \
+		go test ./test/e2e/ -v -ginkgo.v -timeout 20m || rc=$$?; \
 	if [ -z "$(E2E_KEEP)" ]; then $(KIND) delete cluster --name $(E2E_CLUSTER); fi; exit $$rc
 
 .PHONY: lint
@@ -150,8 +152,8 @@ build-proxy: fmt vet ## Build proxy binary.
 	go build -o bin/proxy cmd/proxy/main.go
 
 .PHONY: run
-run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go
+run: manifests generate fmt vet ## Run a controller from your host (webhooks off: no serving cert locally).
+	ENABLE_WEBHOOKS=false go run ./cmd/main.go
 
 .PHONY: run-proxy
 run-proxy: fmt vet ## Run the proxy from your host.
@@ -164,6 +166,10 @@ bench-coldstart: fmt vet ## Run the Phase 1 concurrent cold-start benchmark (see
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
+.PHONY: kustomize-check
+kustomize-check: kustomize ## Fail if the deployable config (config/default) does not build.
+	$(KUSTOMIZE) build config/default > /dev/null
+
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build -t ${IMG} .

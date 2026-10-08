@@ -91,11 +91,11 @@ func nodeSpecFromLabels(n corev1.Node) (scheduler.NodeSpec, error) {
 // profile naming convention, e.g. "1g.10gb" -> "10".
 var migProfileVRAMPattern = regexp.MustCompile(`(?i)(\d+)gb$`)
 
-// parseGPUFractionVRAMMB extracts the VRAM footprint (MiB) implied by a MIG
+// ParseGPUFractionVRAMMB extracts the VRAM footprint (MiB) implied by a MIG
 // profile name. Empty input returns defaultVRAMMB. A non-empty value that
 // doesn't match the "<slices>g.<N>gb" convention is rejected rather than
 // guessed at.
-func parseGPUFractionVRAMMB(gpuFraction string) (int64, error) {
+func ParseGPUFractionVRAMMB(gpuFraction string) (int64, error) {
 	if gpuFraction == "" {
 		return defaultVRAMMB, nil
 	}
