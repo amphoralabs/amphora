@@ -169,10 +169,10 @@ run it yourself.
 - [x] **Phase 2** — Multi-tenant packing (software path complete; hardware-unvalidated):
   - [x] Packing Scheduler with tenancy-class enforcement (#6) and reconciler wiring (#7)
   - [x] Pause-pod pool (#13), hijack (#14), and cold-create fallback (#15)
-  - [x] Admission webhooks for tenancy (#21; [#9](https://github.com/ramin-fazli/amphora/issues/9))
+  - [x] Admission webhooks for tenancy (#21; [#9](https://github.com/amphoralabs/amphora/issues/9))
   - [ ] Residency enforcement against nodes (§4.3): needs a node region label convention and
         scheduler support
-  - [ ] [mTLS between Proxy/Controller/Scheduler](https://github.com/ramin-fazli/amphora/issues/10)
+  - [ ] [mTLS between Proxy/Controller/Scheduler](https://github.com/amphoralabs/amphora/issues/10)
         — `help wanted`
 - [ ] **Phase 3** — Audit trail (WORM), eval/regression gate, multi-cluster orchestrator
   - [x] Eval gate: fail-closed health probe (#16) and exact-match canaries (#19)
@@ -182,8 +182,8 @@ run it yourself.
       benchmark, scale-to-zero and proxy → controller wakeup
 
 Looking for something to pick up? Browse issues labeled
-[`good first issue`](https://github.com/ramin-fazli/amphora/labels/good%20first%20issue) or
-[`help wanted`](https://github.com/ramin-fazli/amphora/labels/help%20wanted).
+[`good first issue`](https://github.com/amphoralabs/amphora/labels/good%20first%20issue) or
+[`help wanted`](https://github.com/amphoralabs/amphora/labels/help%20wanted).
 
 ## Contributing
 
