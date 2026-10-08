@@ -10,8 +10,8 @@ logged) EU AI Act-grade audit trail.
 > Status: **early development, not production-ready.** The control path works end to end on a
 > real Kubernetes cluster (admission, placement, pod assignment, quality gate, routing), but it
 > has only ever run against a GPU-less stub model: nothing here has been validated on real GPUs,
-> MIG, or large models yet, and the storage/streaming layer, residency enforcement, mTLS, and
-> the audit trail are not built. See [What works today](#what-works-today) and the
+> MIG, or large models yet, and the storage/streaming layer, mTLS, and the
+> audit trail are not built. See [What works today](#what-works-today) and the
 > [roadmap](#roadmap).
 
 ## Architecture
@@ -81,6 +81,10 @@ All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
   Failure policy is `Fail`.
 - **Packing Scheduler**: best-fit VRAM bin-packing that independently enforces the tenancy
   isolation matrix at placement time (defense in depth with the webhook).
+- **Data residency** (`allowedRegions`): placement only onto nodes whose standard
+  `topology.kubernetes.io/region` label is listed, failing closed (an unlabeled node never
+  matches). It is re-checked on every reconcile: if the spec changes or a node is relabeled so a
+  running deployment is out of region, its pod is deleted, traffic stops, and it is re-placed.
 - **Pause-pod pool**: a `PausePool` CRD keeps a fixed number of idle, node-pre-bound pods warm per
   node/tenancy/slice. A scheduled deployment **hijacks** an idle pod in place (image swap plus a
   model annotation read through the downward API), and the pool refills. If no pool has an idle
@@ -99,9 +103,11 @@ All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
 
 - **No real-GPU validation.** The e2e uses a stub model server and maps the `nvidia`
   RuntimeClass to `runc`. MIG, time-slicing, and vLLM behavior are untested.
-- **Residency is not enforced.** `allowedRegions` is validated for shape only; no node region
-  label convention exists and the scheduler ignores it, so regulated workloads are *not* kept
-  within their declared regions yet. The webhook warns about this on every use.
+- **Residency depends on node labels and is narrow.** Nodes must carry
+  `topology.kubernetes.io/region`; without it, region-constrained deployments stay `Pending`.
+  Eviction when a deployment drifts out of region is abrupt (no drain), placements live in the
+  controller's memory and are re-derived after a restart, and only `ModelDeployment` placement is
+  covered (not failover across clusters, which does not exist yet).
 - **Quality checking is exact-match only.** Embedding-similarity and judge-model matchers from the
   spec are not implemented, and one shared deadline covers the health probe plus all canaries.
 - **Pools are single-namespace** and statically sized; there is no cross-namespace sharing and no
@@ -171,8 +177,7 @@ run it yourself.
   - [x] Packing Scheduler with tenancy-class enforcement (#6) and reconciler wiring (#7)
   - [x] Pause-pod pool (#13), hijack (#14), and cold-create fallback (#15)
   - [x] Admission webhooks for tenancy (#21; [#9](https://github.com/amphoralabs/amphora/issues/9))
-  - [ ] Residency enforcement against nodes (§4.3): needs a node region label convention and
-        scheduler support
+  - [x] Residency enforcement against the node region label (#23)
   - [ ] [mTLS between Proxy/Controller/Scheduler](https://github.com/amphoralabs/amphora/issues/10)
         — `help wanted`
 - [ ] **Phase 3** — Audit trail (WORM), eval/regression gate, multi-cluster orchestrator
