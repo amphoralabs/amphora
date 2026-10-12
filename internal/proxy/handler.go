@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
@@ -64,7 +65,23 @@ type Config struct {
 	// tenant in the header, gets 403. Requires the listener to be configured
 	// with ServerTLSConfig and a client CA.
 	RequireClientIdentity bool
+
+	// MaxDeferredPerModel and MaxDeferredTotal bound how many requests may be
+	// parked waiting on cold models, per model and overall; beyond them the
+	// proxy answers 503 with Retry-After instead of holding the connection.
+	// Zero uses DefaultMaxDeferredPerModel / DefaultMaxDeferredTotal.
+	MaxDeferredPerModel int
+	MaxDeferredTotal    int
 }
+
+const (
+	// DefaultMaxDeferredPerModel caps parked requests for one cold model.
+	DefaultMaxDeferredPerModel = 256
+	// DefaultMaxDeferredTotal caps parked requests across all models.
+	DefaultMaxDeferredTotal = 4096
+	// retryAfterSeconds is advertised when shedding load.
+	retryAfterSeconds = "5"
+)
 
 // Handler is the connection-deferral proxy PoC's HTTP entrypoint: it routes
 // immediately to a warm target if one exists (§10 T=0..5ms), otherwise
@@ -77,6 +94,10 @@ type Handler struct {
 	logger   *slog.Logger
 
 	proxies sync.Map // upstream URL string -> *httputil.ReverseProxy
+
+	deferMu         sync.Mutex
+	deferredTotal   int
+	deferredByModel map[string]int
 
 	requestsTotal    *prometheus.CounterVec
 	warmRouteLatency prometheus.Histogram
@@ -97,11 +118,19 @@ func NewHandler(registry *Registry, notifier WakeupNotifier, cfg Config, reg pro
 		notifier = NoopWakeupNotifier{Logger: logger}
 	}
 
+	if cfg.MaxDeferredPerModel <= 0 {
+		cfg.MaxDeferredPerModel = DefaultMaxDeferredPerModel
+	}
+	if cfg.MaxDeferredTotal <= 0 {
+		cfg.MaxDeferredTotal = DefaultMaxDeferredTotal
+	}
+
 	h := &Handler{
-		registry: registry,
-		notifier: notifier,
-		cfg:      cfg,
-		logger:   logger,
+		deferredByModel: make(map[string]int),
+		registry:        registry,
+		notifier:        notifier,
+		cfg:             cfg,
+		logger:          logger,
 		requestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -168,7 +197,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cold path: defer the connection rather than failing fast (§10).
+	// Cold path. With known-model tracking (cluster sync), only models that
+	// exist are worth waiting for: an unknown name can never become warm, so
+	// parking it would only let a caller hold connections for the whole
+	// deferral timeout and mint metric series. Answer immediately instead.
+	if h.registry.KnownTracking() {
+		if !h.registry.Synced() {
+			w.Header().Set("Retry-After", "1")
+			h.requestsTotal.WithLabelValues(deniedModelLabel, "starting").Inc()
+			http.Error(w, "proxy is still loading the model list", http.StatusServiceUnavailable)
+			return
+		}
+		if !h.registry.IsKnown(model) {
+			h.requestsTotal.WithLabelValues(deniedModelLabel, "unknown_model").Inc()
+			http.Error(w, "unknown model", http.StatusNotFound)
+			return
+		}
+	}
+
+	// Bound how many connections can be parked (§10 deferral is not free).
+	if !h.acquireDeferral(model) {
+		w.Header().Set("Retry-After", retryAfterSeconds)
+		h.requestsTotal.WithLabelValues(model, "overloaded").Inc()
+		http.Error(w, "too many requests waiting for this model", http.StatusServiceUnavailable)
+		return
+	}
+	defer h.releaseDeferral(model)
+
+	// Defer the connection rather than failing fast (§10).
 	if err := h.notifier.NotifyWakeup(r.Context(), model, tenant); err != nil {
 		h.logger.Error("wakeup notify failed", "model", model, "error", err)
 	}
@@ -179,6 +235,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	waitStart := time.Now()
 	target, err := h.registry.Await(ctx, model)
 	h.coldWaitSeconds.Observe(time.Since(waitStart).Seconds())
+	if errors.Is(err, ErrModelGone) {
+		h.requestsTotal.WithLabelValues(deniedModelLabel, "unknown_model").Inc()
+		http.Error(w, "unknown model", http.StatusNotFound)
+		return
+	}
 	if err != nil {
 		h.requestsTotal.WithLabelValues(model, "timeout").Inc()
 		http.Error(w, "timed out waiting for model to become available", http.StatusServiceUnavailable)
@@ -226,4 +287,26 @@ func (h *Handler) reverseProxyFor(upstream string) *httputil.ReverseProxy {
 	rp := httputil.NewSingleHostReverseProxy(u)
 	actual, _ := h.proxies.LoadOrStore(upstream, rp)
 	return actual.(*httputil.ReverseProxy)
+}
+
+// acquireDeferral reserves a parked-request slot for model, or reports false
+// if the per-model or global cap is reached.
+func (h *Handler) acquireDeferral(model string) bool {
+	h.deferMu.Lock()
+	defer h.deferMu.Unlock()
+	if h.deferredTotal >= h.cfg.MaxDeferredTotal || h.deferredByModel[model] >= h.cfg.MaxDeferredPerModel {
+		return false
+	}
+	h.deferredTotal++
+	h.deferredByModel[model]++
+	return true
+}
+
+func (h *Handler) releaseDeferral(model string) {
+	h.deferMu.Lock()
+	defer h.deferMu.Unlock()
+	h.deferredTotal--
+	if h.deferredByModel[model]--; h.deferredByModel[model] <= 0 {
+		delete(h.deferredByModel, model)
+	}
 }

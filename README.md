@@ -69,7 +69,7 @@ gRPC link, so there is also no proxy → controller wakeup path yet (nothing sca
 ## What works today
 
 All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
-(`make test-e2e`, 19 specs, also run in CI):
+(`make test-e2e`, 20 specs, also run in CI):
 
 - **`ModelDeployment` CRD** (`amphora.amphora.sh/v1alpha1`) with an immutable `tenancyClass`
   (`SingleTenant` / `TrustedMultiTenant` / `RegulatedMultiTenant`), `gpuFraction` (MIG profile),
@@ -94,8 +94,10 @@ All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
   expected (`/v1/completions`, exact match). It **fails closed**: a failed pod is deleted, and
   after 3 consecutive failures promotion pauses until an operator approves. Without canaries only
   latency is checked and `QualityVerified` stays `False`.
-- **Proxy** with connection deferral (requests for a not-yet-warm model are held open rather than
-  failed), namespace-qualified model keys (`X-Amphora-Model: <namespace>/<name>`), and routing only
+- **Proxy** with connection deferral (requests for a model that exists but is not warm yet are held
+  open rather than failed; a model that does not exist is an immediate `404`, and the number of
+  parked requests is capped per model and overall, shedding load with `503` + `Retry-After`),
+  namespace-qualified model keys (`X-Amphora-Model: <namespace>/<name>`), and routing only
   to deployments that have passed the gate.
 - **Client identity at the proxy** (spec §5 Spoofing/Repudiation). With `-tls-cert`, `-tls-key` and
   `-tls-client-ca`, callers must present a certificate signed by that CA. The tenant is taken from

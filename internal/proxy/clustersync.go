@@ -44,7 +44,12 @@ func ModelKey(md *amphorav1alpha1.ModelDeployment) string {
 // including deletion, marks it cold so no traffic reaches an ungated pod.
 func ApplyModelDeployment(reg *Registry, md *amphorav1alpha1.ModelDeployment, logger *slog.Logger) {
 	key := ModelKey(md)
-	if !md.DeletionTimestamp.IsZero() || md.Status.Phase != controller.PhaseServing {
+	if !md.DeletionTimestamp.IsZero() {
+		reg.MarkUnknown(key)
+		return
+	}
+	reg.MarkKnown(key)
+	if md.Status.Phase != controller.PhaseServing {
 		reg.MarkCold(key)
 		return
 	}
@@ -76,7 +81,10 @@ func SyncFromCluster(ctx context.Context, cfg *rest.Config, scheme *runtime.Sche
 			ApplyModelDeployment(reg, md, logger)
 		}
 	}
-	if _, err := informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
+	// Existence tracking must be on before any event is delivered, so a model
+	// is never judged unknown merely because its Add has not been seen yet.
+	reg.EnableKnownTracking()
+	registration, err := informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
 		AddFunc:    apply,
 		UpdateFunc: func(_, obj interface{}) { apply(obj) },
 		DeleteFunc: func(obj interface{}) {
@@ -84,16 +92,23 @@ func SyncFromCluster(ctx context.Context, cfg *rest.Config, scheme *runtime.Sche
 				obj = tomb.Obj
 			}
 			if md, ok := obj.(*amphorav1alpha1.ModelDeployment); ok {
-				reg.MarkCold(ModelKey(md))
+				reg.MarkUnknown(ModelKey(md))
 			}
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("adding event handler: %w", err)
 	}
 	go func() { _ = c.Start(ctx) }()
 	if !c.WaitForCacheSync(ctx) {
 		return fmt.Errorf("cache failed to sync")
 	}
+	// The cache having synced is not enough: our handler must also have
+	// processed the initial list, or real models would briefly look unknown.
+	if !toolscache.WaitForCacheSync(ctx.Done(), registration.HasSynced) {
+		return fmt.Errorf("event handler failed to sync")
+	}
+	reg.SetSynced()
 	logger.Info("cluster sync started")
 	<-ctx.Done()
 	return nil
