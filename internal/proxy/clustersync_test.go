@@ -30,14 +30,14 @@ import (
 
 func testMD(phase, endpoint string) *amphorav1alpha1.ModelDeployment {
 	return &amphorav1alpha1.ModelDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: "team-a"},
+		ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: tenantA},
 		Status:     amphorav1alpha1.ModelDeploymentStatus{Phase: phase, Endpoint: endpoint},
 	}
 }
 
 func TestApplyModelDeployment(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	const key = "team-a/llama"
+	const key = modelA
 
 	tests := []struct {
 		name     string
@@ -59,7 +59,7 @@ func TestApplyModelDeployment(t *testing.T) {
 			if warm != tc.wantWarm {
 				t.Fatalf("warm = %v, want %v", warm, tc.wantWarm)
 			}
-			if warm && (tgt.Upstream != tc.md.Status.Endpoint || tgt.Tenant != "team-a" || tgt.Model != key) {
+			if warm && (tgt.Upstream != tc.md.Status.Endpoint || tgt.Tenant != tenantA || tgt.Model != key) {
 				t.Fatalf("target = %+v", tgt)
 			}
 		})
@@ -71,13 +71,13 @@ func TestApplyModelDeploymentTransitionsAndDeletion(t *testing.T) {
 	reg := NewRegistry()
 	md := testMD(controller.PhaseServing, "http://10.0.0.5:8000")
 	ApplyModelDeployment(reg, md, logger)
-	if _, warm := reg.Warm("team-a/llama"); !warm {
+	if _, warm := reg.Warm(modelA); !warm {
 		t.Fatal("want warm after Serving")
 	}
 
 	md.Status.Phase = controller.PhaseWarming // pod replaced, being re-gated
 	ApplyModelDeployment(reg, md, logger)
-	if _, warm := reg.Warm("team-a/llama"); warm {
+	if _, warm := reg.Warm(modelA); warm {
 		t.Fatal("want cold once no longer Serving")
 	}
 
@@ -86,7 +86,7 @@ func TestApplyModelDeploymentTransitionsAndDeletion(t *testing.T) {
 	now := metav1.NewTime(time.Now())
 	md.DeletionTimestamp = &now
 	ApplyModelDeployment(reg, md, logger)
-	if _, warm := reg.Warm("team-a/llama"); warm {
+	if _, warm := reg.Warm(modelA); warm {
 		t.Fatal("want cold while being deleted")
 	}
 }

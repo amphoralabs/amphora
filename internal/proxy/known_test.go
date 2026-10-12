@@ -113,20 +113,20 @@ func TestKnownColdModelIsStillDeferredThenRouted(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer upstream.Close()
 	h, reg, _, _ := trackingHandler(t, Config{}, true)
-	reg.MarkKnown("team-a/llama")
+	reg.MarkKnown(modelA)
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		reg.MarkWarm(Target{Model: "team-a/llama", Tenant: "team-a", Upstream: upstream.URL})
+		reg.MarkWarm(Target{Model: modelA, Tenant: tenantA, Upstream: upstream.URL})
 	}()
 
-	if rec := serve(h, "team-a/llama"); rec.Code != http.StatusOK {
+	if rec := serve(h, modelA); rec.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200 once the model warms", rec.Code)
 	}
 }
 
 func TestBeforeInitialSyncTheProxyDoesNotGuess(t *testing.T) {
 	h, _, _, _ := trackingHandler(t, Config{}, false)
-	rec := serve(h, "team-a/llama")
+	rec := serve(h, modelA)
 	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" {
 		t.Fatalf("got %d (Retry-After %q); want 503 with Retry-After, not a 404 for a model that may exist",
 			rec.Code, rec.Header().Get("Retry-After"))
@@ -135,12 +135,12 @@ func TestBeforeInitialSyncTheProxyDoesNotGuess(t *testing.T) {
 
 func TestDeletingAModelReleasesDeferredRequests(t *testing.T) {
 	h, reg, _, _ := trackingHandler(t, Config{DeferralTimeout: 30 * time.Second}, true)
-	reg.MarkKnown("team-a/llama")
+	reg.MarkKnown(modelA)
 
 	done := make(chan int, 1)
-	go func() { done <- serve(h, "team-a/llama").Code }()
+	go func() { done <- serve(h, modelA).Code }()
 	time.Sleep(100 * time.Millisecond) // let it park
-	reg.MarkUnknown("team-a/llama")
+	reg.MarkUnknown(modelA)
 
 	select {
 	case code := <-done:
@@ -210,21 +210,21 @@ func TestDeferredRequestsAreBoundedPerModelAndInTotal(t *testing.T) {
 func TestApplyModelDeploymentTracksExistence(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reg := NewRegistry()
-	md := &amphorav1alpha1.ModelDeployment{ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: "team-a"}}
+	md := &amphorav1alpha1.ModelDeployment{ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: tenantA}}
 	md.Status.Phase = controller.PhaseWarming
 
 	ApplyModelDeployment(reg, md, logger)
-	if !reg.IsKnown("team-a/llama") {
+	if !reg.IsKnown(modelA) {
 		t.Fatal("a Warming deployment exists and must be known (so it is deferred, not 404'd)")
 	}
-	if _, warm := reg.Warm("team-a/llama"); warm {
+	if _, warm := reg.Warm(modelA); warm {
 		t.Fatal("a Warming deployment must not be routable")
 	}
 
 	now := metav1.NewTime(time.Now())
 	md.DeletionTimestamp = &now
 	ApplyModelDeployment(reg, md, logger)
-	if reg.IsKnown("team-a/llama") {
+	if reg.IsKnown(modelA) {
 		t.Fatal("a deployment being deleted must be forgotten")
 	}
 }
