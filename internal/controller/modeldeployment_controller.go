@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -95,6 +96,11 @@ type ModelDeploymentReconciler struct {
 	// APIReader reads the canary ConfigMap uncached (get-only RBAC). Use
 	// mgr.GetAPIReader().
 	APIReader client.Reader
+
+	// restoreMu/restored make the one-time scheduler rebuild (ensureRestored)
+	// safe across concurrent reconciles. Zero values are ready to use.
+	restoreMu sync.Mutex
+	restored  bool
 }
 
 //+kubebuilder:rbac:groups=amphora.amphora.sh,resources=modeldeployments,verbs=get;list;watch;create;update;patch;delete
@@ -151,23 +157,16 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	vramMB, err := ParseGPUFractionVRAMMB(md.Spec.GPUFraction)
+	placementReq, err := placementRequestFor(&md)
 	if err != nil {
 		return r.recordOutcome(ctx, &md, PhaseRejected, "", err)
 	}
 
-	var requestedMode scheduler.PackingMode
-	if md.Spec.GPUFraction != "" {
-		requestedMode = scheduler.PackingModeMIG
-	}
-
-	placementReq := scheduler.PlacementRequest{
-		Model:              model,
-		TenancyClass:       md.Spec.TenancyClass,
-		VRAMMB:             vramMB,
-		RequestedMode:      requestedMode,
-		MaxColocatedModels: md.Spec.MaxColocatedModels,
-		AllowedRegions:     md.Spec.AllowedRegions,
+	// Rebuild the scheduler's whole view before the first placement decision
+	// (see ensureRestored), so the order deployments reconcile in after a
+	// restart cannot let a new one take a node a running one occupies.
+	if err := r.ensureRestored(ctx); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// The scheduler is in memory: after a controller restart it has no record
@@ -293,4 +292,76 @@ func (r *ModelDeploymentReconciler) evictAndReplace(ctx context.Context, md *amp
 		return res, err
 	}
 	return ctrl.Result{RequeueAfter: time.Second}, nil
+}
+
+// placementRequestFor derives the Packing Scheduler request from md's spec. An
+// unparseable gpuFraction is an error (the webhook normally rejects it first).
+func placementRequestFor(md *amphorav1alpha1.ModelDeployment) (scheduler.PlacementRequest, error) {
+	vramMB, err := ParseGPUFractionVRAMMB(md.Spec.GPUFraction)
+	if err != nil {
+		return scheduler.PlacementRequest{}, err
+	}
+	var requestedMode scheduler.PackingMode
+	if md.Spec.GPUFraction != "" {
+		requestedMode = scheduler.PackingModeMIG
+	}
+	return scheduler.PlacementRequest{
+		Model:              md.Namespace + "/" + md.Name,
+		TenancyClass:       md.Spec.TenancyClass,
+		VRAMMB:             vramMB,
+		RequestedMode:      requestedMode,
+		MaxColocatedModels: md.Spec.MaxColocatedModels,
+		AllowedRegions:     md.Spec.AllowedRegions,
+	}, nil
+}
+
+// ensureRestored rebuilds the scheduler's placements from the cluster, once.
+// The scheduler is in memory, so after a controller restart (or a new leader
+// taking over) it is empty while pods keep running. Restoring a deployment
+// only when it itself reconciles left a window in which a NEW deployment,
+// reconciled first, could be placed on a node a running SingleTenant one
+// occupies (§4). Doing the whole rebuild up front, before any placement
+// decision, makes reconcile order irrelevant.
+//
+// A deployment that cannot be restored (its node no longer fits, or is not a
+// GPU node) is skipped here: its own reconcile re-checks and evicts it. The
+// rebuild is retried on the next reconcile if listing fails, so a failure
+// never leaves placement running on a partial view.
+func (r *ModelDeploymentReconciler) ensureRestored(ctx context.Context) error {
+	r.restoreMu.Lock()
+	defer r.restoreMu.Unlock()
+	if r.restored {
+		return nil
+	}
+	if err := r.syncSchedulerNodes(ctx); err != nil {
+		return fmt.Errorf("syncing GPU nodes before restoring placements: %w", err)
+	}
+	var all amphorav1alpha1.ModelDeploymentList
+	if err := r.List(ctx, &all); err != nil {
+		return fmt.Errorf("listing ModelDeployments to restore placements: %w", err)
+	}
+	logger := log.FromContext(ctx)
+	restoredCount := 0
+	for i := range all.Items {
+		md := &all.Items[i]
+		node, err := r.observedNode(ctx, md)
+		if err != nil {
+			return err
+		}
+		if node == "" {
+			continue
+		}
+		req, err := placementRequestFor(md)
+		if err != nil {
+			continue // invalid spec: its own reconcile rejects it
+		}
+		if _, err := r.Scheduler.Restore(req, node); err != nil {
+			logger.Info("could not restore placement; its reconcile will re-check", "model", req.Model, "node", node, "reason", err.Error())
+			continue
+		}
+		restoredCount++
+	}
+	r.restored = true
+	logger.Info("scheduler placements rebuilt from cluster state", "restored", restoredCount, "deployments", len(all.Items))
+	return nil
 }
