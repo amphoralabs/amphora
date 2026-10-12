@@ -70,7 +70,7 @@ gRPC link, so there is also no proxy → controller wakeup path yet (nothing sca
 ## What works today
 
 All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
-(`make test-e2e`, 14 specs, also run in CI):
+(`make test-e2e`, 15 specs, also run in CI):
 
 - **`ModelDeployment` CRD** (`amphora.amphora.sh/v1alpha1`) with an immutable `tenancyClass`
   (`SingleTenant` / `TrustedMultiTenant` / `RegulatedMultiTenant`), `gpuFraction` (MIG profile),
@@ -105,9 +105,13 @@ All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
   RuntimeClass to `runc`. MIG, time-slicing, and vLLM behavior are untested.
 - **Residency depends on node labels and is narrow.** Nodes must carry
   `topology.kubernetes.io/region`; without it, region-constrained deployments stay `Pending`.
-  Eviction when a deployment drifts out of region is abrupt (no drain), placements live in the
-  controller's memory and are re-derived after a restart, and only `ModelDeployment` placement is
-  covered (not failover across clusters, which does not exist yet).
+  Eviction when a deployment drifts out of region is abrupt (no drain), and only
+  `ModelDeployment` placement is covered (not failover across clusters, which does not exist yet).
+- **Scheduler state is in memory.** After a controller restart, running deployments are re-adopted
+  at the node their pod actually occupies (validated against the same tenancy, region and
+  capacity rules; one that no longer fits is evicted and re-placed), not recomputed from scratch.
+  Capacity is therefore only rebuilt as each deployment reconciles, and there is no leader-election
+  handoff of scheduler state between replicas.
 - **Quality checking is exact-match only.** Embedding-similarity and judge-model matchers from the
   spec are not implemented, and one shared deadline covers the health probe plus all canaries.
 - **Pools are single-namespace** and statically sized; there is no cross-namespace sharing and no

@@ -82,6 +82,11 @@ var (
 	// placement). The caller must evict and re-place; the scheduler never
 	// leaves a regulated workload outside its declared regions (§4.3).
 	ErrResidencyViolation = errors.New("scheduler: existing placement violates residency constraint")
+	// ErrRestoreConflict is returned by Restore when a placement observed in
+	// the cluster cannot be recorded as-is: the node no longer satisfies the
+	// request's tenancy, region, or capacity constraints (e.g. another
+	// workload now occupies a node a SingleTenant pod was found on).
+	ErrRestoreConflict = errors.New("scheduler: observed placement conflicts with current constraints")
 	// ErrNodeExists is returned by RegisterNode for a duplicate node ID.
 	ErrNodeExists = errors.New("scheduler: node already registered")
 	// ErrNodeNotFound is returned when referencing an unregistered node ID.
@@ -336,12 +341,62 @@ func (s *Scheduler) Place(req PlacementRequest) (Placement, error) {
 		return Placement{}, err
 	}
 
+	return s.recordLocked(node, req, mode), nil
+}
+
+// recordLocked books req onto node. Caller must hold s.mu.
+func (s *Scheduler) recordLocked(node *nodeState, req PlacementRequest, mode PackingMode) Placement {
 	p := Placement{Model: req.Model, NodeID: node.spec.ID, Mode: mode, VRAMMB: req.VRAMMB}
 	node.placements[req.Model] = p
 	node.usedVRAMMB += req.VRAMMB
 	s.tenancyClass[req.Model] = req.TenancyClass
 	s.updateNodeMetricsLocked(node)
-	return p, nil
+	return p
+}
+
+// Restore records that req.Model is already running on nodeID, instead of
+// choosing a node. The scheduler's state is in memory, so after a controller
+// restart it is empty while pods are still running; re-placing them from
+// scratch could pick a different node than the one they occupy and let another
+// workload (a second SingleTenant, say) be placed beside a live one, breaking
+// the §4 isolation guarantees. The observed node is validated against the same
+// tenancy, region, and capacity rules as Place; if it no longer satisfies them
+// the caller must evict and re-place. It is idempotent for a model that is
+// already placed (same checks as Place).
+func (s *Scheduler) Restore(req PlacementRequest, nodeID string) (Placement, error) {
+	if err := validateRequest(req); err != nil {
+		return Placement{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if existing, ok := s.existingPlacementLocked(req.Model); ok {
+		if existing.NodeID != nodeID {
+			return Placement{}, fmt.Errorf("%w: %s is recorded on node %s but observed on %s",
+				ErrRestoreConflict, req.Model, existing.NodeID, nodeID)
+		}
+		return existing, nil
+	}
+
+	node, ok := s.nodes[nodeID]
+	if !ok {
+		return Placement{}, fmt.Errorf("%w: %s", ErrNodeNotFound, nodeID)
+	}
+	if !regionAllowed(node.spec.Region, req.AllowedRegions) {
+		s.residencyViolations.WithLabelValues(string(req.TenancyClass)).Inc()
+		return Placement{}, fmt.Errorf("%w: %s is on node %s in region %q, allowed %v",
+			ErrResidencyViolation, req.Model, nodeID, node.spec.Region, req.AllowedRegions)
+	}
+	mode, err := resolveMode(req)
+	if err != nil {
+		s.violationsBlocked.WithLabelValues(string(req.TenancyClass)).Inc()
+		return Placement{}, err
+	}
+	if !s.compatibleLocked(node, req, mode) || node.freeVRAMMB() < req.VRAMMB {
+		return Placement{}, fmt.Errorf("%w: %s on node %s (tenancyClass=%s mode=%s vramMB=%d)",
+			ErrRestoreConflict, req.Model, nodeID, req.TenancyClass, mode, req.VRAMMB)
+	}
+	return s.recordLocked(node, req, mode), nil
 }
 
 func (s *Scheduler) existingPlacementLocked(model string) (Placement, bool) {
