@@ -52,6 +52,9 @@ func main() {
 		readHeaderTimeout time.Duration
 		syncFromCluster   bool
 		enableAdmin       bool
+		tlsCert           string
+		tlsKey            string
+		tlsClientCA       string
 	)
 	flag.StringVar(&addr, "addr", ":8080", "address to listen on for inbound inference traffic")
 	flag.DurationVar(&deferralTimeout, "deferral-timeout", proxy.DefaultDeferralTimeout,
@@ -62,6 +65,11 @@ func main() {
 		"watch ModelDeployments via the Kubernetes API and route only to models the controller reports Serving")
 	flag.BoolVar(&enableAdmin, "enable-admin-endpoints", false,
 		"expose unauthenticated /admin/warm and /admin/cold for local simulation; never enable alongside real traffic")
+	flag.StringVar(&tlsCert, "tls-cert", "", "serve inference traffic over TLS with this certificate (re-read on change)")
+	flag.StringVar(&tlsKey, "tls-key", "", "private key for -tls-cert")
+	flag.StringVar(&tlsClientCA, "tls-client-ca", "",
+		"require clients to present a certificate signed by this CA bundle; the tenant is then taken from the "+
+			"certificate's common name and a tenant may only reach its own models (spec §5)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -70,7 +78,19 @@ func main() {
 	notifier := proxy.NoopWakeupNotifier{Logger: logger}
 	registerer := prometheus.NewRegistry()
 
-	handler := proxy.NewHandler(registry, notifier, proxy.Config{DeferralTimeout: deferralTimeout}, registerer, logger)
+	if (tlsCert == "") != (tlsKey == "") {
+		logger.Error("-tls-cert and -tls-key must be set together")
+		os.Exit(1)
+	}
+	if tlsClientCA != "" && tlsCert == "" {
+		logger.Error("-tls-client-ca requires -tls-cert and -tls-key: client identity is only meaningful over TLS")
+		os.Exit(1)
+	}
+
+	handler := proxy.NewHandler(registry, notifier, proxy.Config{
+		DeferralTimeout:       deferralTimeout,
+		RequireClientIdentity: tlsClientCA != "",
+	}, registerer, logger)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -90,6 +110,23 @@ func main() {
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,
+	}
+	tlsCtx, cancelTLS := context.WithCancel(context.Background())
+	defer cancelTLS()
+	if tlsCert != "" {
+		tlsCfg, err := proxy.ServerTLSConfig(tlsCtx, tlsCert, tlsKey, tlsClientCA)
+		if err != nil {
+			logger.Error("configuring TLS", "error", err)
+			os.Exit(1)
+		}
+		srv.TLSConfig = tlsCfg
+		if tlsClientCA == "" {
+			logger.Warn("TLS without -tls-client-ca: callers are not authenticated and the " +
+				"X-Amphora-Tenant header is client-asserted")
+		}
+	} else {
+		logger.Warn("serving plaintext HTTP with no client authentication; the X-Amphora-Tenant header " +
+			"is client-asserted. Use -tls-cert/-tls-key/-tls-client-ca outside local development")
 	}
 
 	syncCtx, cancelSync := context.WithCancel(context.Background())
@@ -116,6 +153,10 @@ func main() {
 	serveErr := make(chan error, 1)
 	go func() {
 		logger.Info("proxy listening", "addr", addr)
+		if srv.TLSConfig != nil {
+			serveErr <- srv.ListenAndServeTLS("", "") // certificates come from TLSConfig
+			return
+		}
 		serveErr <- srv.ListenAndServe()
 	}()
 
