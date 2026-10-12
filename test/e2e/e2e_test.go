@@ -557,4 +557,32 @@ subjects:
 			Expect(code("curl-metrics-ok", allowed)).To(Equal("200"))
 		})
 	})
+
+	It("keeps a Serving deployment, and its node's capacity accounting, across a manager restart", func() {
+		const first, second = "e2e-restart-1", "e2e-restart-2"
+		apply(modelDeployment(first))
+		Eventually(func() string { return field(kindMD, first, "{.status.phase}") }, 4*time.Minute, 3*time.Second).
+			Should(Equal("Serving"))
+		podUID := field(kindPod, first+"-serve", "{.metadata.uid}")
+		Expect(podUID).NotTo(BeEmpty())
+
+		By("restarting the manager: its in-memory scheduler starts empty")
+		kubectl("rollout", "restart", "deploy/manager", "-n", systemNS)
+		kubectl("rollout", "status", "deploy/manager", "-n", systemNS, "--timeout=180s")
+
+		By("the running deployment is re-adopted in place: still Serving, same pod, nothing evicted")
+		Consistently(func() string { return field(kindPod, first+"-serve", "{.metadata.uid}") },
+			20*time.Second, 4*time.Second).Should(Equal(podUID))
+		Expect(field(kindMD, first, "{.status.phase}")).To(Equal("Serving"))
+
+		By("and the node is still accounted for: a second SingleTenant cannot share it")
+		apply(modelDeployment(second))
+		Eventually(func() string { return field(kindMD, second, "{.status.phase}") }, time.Minute, 2*time.Second).
+			Should(Equal("Pending"))
+		_, err := kubectlTry(verbGet, kindPod, second+"-serve", "-n", nsDefault)
+		Expect(err).To(HaveOccurred(), "a second SingleTenant pod must not exist on the occupied node")
+
+		deleteAndWait(kindMD, second)
+		deleteAndWait(kindMD, first)
+	})
 })

@@ -161,17 +161,35 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		requestedMode = scheduler.PackingModeMIG
 	}
 
-	placement, err := r.Scheduler.Place(scheduler.PlacementRequest{
+	placementReq := scheduler.PlacementRequest{
 		Model:              model,
 		TenancyClass:       md.Spec.TenancyClass,
 		VRAMMB:             vramMB,
 		RequestedMode:      requestedMode,
 		MaxColocatedModels: md.Spec.MaxColocatedModels,
 		AllowedRegions:     md.Spec.AllowedRegions,
-	})
+	}
+
+	// The scheduler is in memory: after a controller restart it has no record
+	// of deployments whose pods are still running. Re-adopt them where they
+	// actually are rather than re-placing, which could choose another node and
+	// let a second workload share a node with a live SingleTenant pod (§4).
+	if _, placed := r.Scheduler.Placement(model); !placed {
+		observed, obsErr := r.observedNode(ctx, &md)
+		if obsErr != nil {
+			return ctrl.Result{}, obsErr
+		}
+		if observed != "" {
+			if _, restoreErr := r.Scheduler.Restore(placementReq, observed); restoreErr != nil {
+				return r.evictAndReplace(ctx, &md, model, restoreErr)
+			}
+		}
+	}
+
+	placement, err := r.Scheduler.Place(placementReq)
 	if err != nil {
 		if errors.Is(err, scheduler.ErrResidencyViolation) {
-			return r.evictForResidency(ctx, &md, model, err)
+			return r.evictAndReplace(ctx, &md, model, err)
 		}
 		if errors.Is(err, scheduler.ErrNoCapacity) {
 			if res, statusErr := r.recordOutcome(ctx, &md, PhasePending, "", err); statusErr != nil {
@@ -235,14 +253,31 @@ func (r *ModelDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// evictForResidency enforces §4.3 when a placed deployment is found outside
-// its allowedRegions (the spec changed, or its node was relabeled): the
-// placement is released and the pod deleted so no regulated workload keeps
-// running out of region, then the deployment is re-placed from scratch on the
-// next reconcile (Pending if no allowed node exists). Traffic stops because
-// status.endpoint is cleared by the non-Serving phase.
-func (r *ModelDeploymentReconciler) evictForResidency(ctx context.Context, md *amphorav1alpha1.ModelDeployment, model string, cause error) (ctrl.Result, error) {
-	log.FromContext(ctx).Info("evicting: placement violates allowedRegions", "model", model, "reason", cause.Error())
+// observedNode returns the node of md's live pod (hijacked or cold-created),
+// or "" if it has none. Pods are matched by the hijackedBy label the
+// controller sets on every pod it assigns to a deployment.
+func (r *ModelDeploymentReconciler) observedNode(ctx context.Context, md *amphorav1alpha1.ModelDeployment) (string, error) {
+	var owned corev1.PodList
+	if err := r.List(ctx, &owned, client.InNamespace(md.Namespace), client.MatchingLabels{hijackedByLabel: md.Name}); err != nil {
+		return "", fmt.Errorf("listing pods to find the observed node: %w", err)
+	}
+	for _, p := range activePods(owned.Items) {
+		if p.Spec.NodeName != "" {
+			return p.Spec.NodeName, nil
+		}
+	}
+	return "", nil
+}
+
+// evictAndReplace handles a deployment whose live placement can no longer be
+// kept: it is outside its allowedRegions (§4.3: the spec changed or the node
+// was relabeled), or it cannot be re-adopted at the node its pod occupies
+// after a restart. The placement is released and the pod deleted so nothing
+// keeps running somewhere the rules forbid, then the deployment is re-placed
+// from scratch on the next reconcile (Pending if no suitable node exists).
+// Traffic stops because status.endpoint is cleared by the non-Serving phase.
+func (r *ModelDeploymentReconciler) evictAndReplace(ctx context.Context, md *amphorav1alpha1.ModelDeployment, model string, cause error) (ctrl.Result, error) {
+	log.FromContext(ctx).Info("evicting: live placement violates current constraints", "model", model, "reason", cause.Error())
 	var owned corev1.PodList
 	if err := r.List(ctx, &owned, client.InNamespace(md.Namespace), client.MatchingLabels{hijackedByLabel: md.Name}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("listing pods to evict: %w", err)

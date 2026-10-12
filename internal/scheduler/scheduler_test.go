@@ -30,6 +30,8 @@ import (
 const (
 	testNodeID = "gpu-0"
 	regionUS   = "us-east-1"
+	nodeBig    = "big"
+	nodeSmall  = "small"
 	regionEU   = "eu-west-1"
 )
 
@@ -465,5 +467,75 @@ func TestRelabeledNodeTriggersViolationOnNextPlace(t *testing.T) {
 	}
 	if _, err := s.Place(req); !errors.Is(err, ErrResidencyViolation) {
 		t.Fatalf("Place after the node moved regions = %v, want ErrResidencyViolation", err)
+	}
+}
+
+func TestRestoreRecordsPlacementAtObservedNode(t *testing.T) {
+	s := newTestScheduler(t)
+	mustRegisterNode(t, s, NodeSpec{ID: nodeBig, TotalVRAMMB: 80_000})
+	mustRegisterNode(t, s, NodeSpec{ID: nodeSmall, TotalVRAMMB: 40_000}) // best-fit would prefer this one
+	req := PlacementRequest{Model: "a", TenancyClass: amphorav1alpha1.TenancySingleTenant, VRAMMB: 10_000}
+
+	p, err := s.Restore(req, nodeBig)
+	if err != nil || p.NodeID != nodeBig {
+		t.Fatalf("Restore = %+v, %v; want recorded on big", p, err)
+	}
+	if got, _ := s.Placement("a"); got.NodeID != nodeBig {
+		t.Fatalf("Placement = %+v, want node big", got)
+	}
+	// Idempotent at the same node; a different observed node is a conflict.
+	if _, err := s.Restore(req, nodeBig); err != nil {
+		t.Fatalf("repeat Restore = %v, want nil", err)
+	}
+	if _, err := s.Restore(req, nodeSmall); !errors.Is(err, ErrRestoreConflict) {
+		t.Fatalf("Restore at a different node = %v, want ErrRestoreConflict", err)
+	}
+	// And Place keeps honoring the restored placement.
+	if p, err := s.Place(req); err != nil || p.NodeID != nodeBig {
+		t.Fatalf("Place after Restore = %+v, %v; want big", p, err)
+	}
+}
+
+func TestRestoredPlacementBlocksSharingASingleTenantNode(t *testing.T) {
+	s := newTestScheduler(t)
+	mustRegisterNode(t, s, NodeSpec{ID: "a", TotalVRAMMB: 80_000})
+	mustRegisterNode(t, s, NodeSpec{ID: "b", TotalVRAMMB: 80_000})
+	if _, err := s.Restore(PlacementRequest{Model: "first", TenancyClass: amphorav1alpha1.TenancySingleTenant, VRAMMB: 10_000}, "a"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.Place(PlacementRequest{Model: "second", TenancyClass: amphorav1alpha1.TenancySingleTenant, VRAMMB: 10_000})
+	if err != nil || p.NodeID != "b" {
+		t.Fatalf("second SingleTenant = %+v, %v; want node b, never the restored node a", p, err)
+	}
+}
+
+func TestRestoreRejectsPlacementsThatNoLongerSatisfyTheRules(t *testing.T) {
+	s := newTestScheduler(t)
+	mustRegisterNode(t, s, NodeSpec{ID: "n", TotalVRAMMB: 20_000, Region: regionEU})
+	single := func(model string, regions ...string) PlacementRequest {
+		return PlacementRequest{Model: model, TenancyClass: amphorav1alpha1.TenancySingleTenant, VRAMMB: 10_000, AllowedRegions: regions}
+	}
+
+	if _, err := s.Restore(single("a"), "missing"); !errors.Is(err, ErrNodeNotFound) {
+		t.Errorf("unknown node = %v, want ErrNodeNotFound", err)
+	}
+	if _, err := s.Restore(single("b", regionUS), "n"); !errors.Is(err, ErrResidencyViolation) {
+		t.Errorf("node outside allowed regions = %v, want ErrResidencyViolation", err)
+	}
+	if _, err := s.Restore(PlacementRequest{Model: "c", TenancyClass: amphorav1alpha1.TenancySingleTenant, VRAMMB: 30_000}, "n"); !errors.Is(err, ErrRestoreConflict) {
+		t.Errorf("more VRAM than the node has = %v, want ErrRestoreConflict", err)
+	}
+	if _, err := s.Restore(PlacementRequest{Model: "d", TenancyClass: amphorav1alpha1.TenancyRegulatedMultiTenant, VRAMMB: 5_000}, "n"); !errors.Is(err, ErrRestoreConflict) {
+		t.Errorf("MIG-requiring class on a non-MIG node = %v, want ErrRestoreConflict", err)
+	}
+	// Two SingleTenant claims on one node: the second cannot be restored.
+	if _, err := s.Restore(single("e"), "n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Restore(single("f"), "n"); !errors.Is(err, ErrRestoreConflict) {
+		t.Errorf("second SingleTenant on an occupied node = %v, want ErrRestoreConflict", err)
+	}
+	if _, err := s.Restore(PlacementRequest{Model: "", VRAMMB: 1}, "n"); !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("invalid request = %v, want ErrInvalidRequest", err)
 	}
 }
