@@ -147,6 +147,12 @@ All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
   that tenant). It also adds a loopback hop and a small container per pod. The controller and
   scheduler share a process and proxy <-> controller goes through the Kubernetes API, so there is
   no further internal hop to secure.
+- **Scale-to-zero and a proxy -> controller wakeup are not built, by design.** The proxy never
+  calls the controller; it only watches `ModelDeployment` status. If scale-to-zero is added, a wakeup
+  should be signalled through the Kubernetes API (for example a field or annotation the controller
+  watches, written with a narrowly scoped RBAC rule) rather than a new network listener on the
+  controller: the API server already provides mutual TLS, authentication and authorization, and a
+  hand-built RPC channel would be a new spoofable endpoint ([#30](https://github.com/amphoralabs/amphora/issues/30)).
 - **Client authentication is certificate-only** (no OIDC or API keys), and the tenant must equal
   the model's namespace. A single client certificate cannot span several tenants.
 - The webhook's cert-manager certificate path is build-checked but not exercised in CI (the e2e
