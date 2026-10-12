@@ -79,14 +79,15 @@ func (r *ModelDeploymentReconciler) runEvalGate(ctx context.Context, md *amphora
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	url := fmt.Sprintf("http://%s:%d%s", pod.Status.PodIP, port, probePath)
+	base := r.podTarget(&pod, md.Namespace, port)
+	probeTarget := PodTarget{URL: base.URL + probePath, ServerName: base.ServerName}
 
-	gateErr := r.EvalProber.Probe(probeCtx, url)
+	gateErr := r.EvalProber.Probe(probeCtx, probeTarget)
 	reason := ""
 	canary := md.Spec.EvalGate.Enabled && md.Spec.EvalGate.CanaryConfigMapRef != ""
 	if gateErr == nil && canary {
 		reason = reasonCanaryFailed
-		gateErr = r.runCanaries(probeCtx, md, fmt.Sprintf("http://%s:%d", pod.Status.PodIP, port))
+		gateErr = r.runCanaries(probeCtx, md, base)
 	}
 	if gateErr != nil {
 		return r.failGate(ctx, md, &pod, placement, gateErr, reason)
@@ -107,14 +108,14 @@ func (r *ModelDeploymentReconciler) runEvalGate(ctx context.Context, md *amphora
 			Message: "only the default latency probe ran; output quality unverified", ObservedGeneration: md.Generation,
 		})
 	}
-	md.Status.Endpoint = fmt.Sprintf("http://%s:%d", pod.Status.PodIP, port)
+	md.Status.Endpoint = base.URL
 	return r.recordOutcome(ctx, md, PhaseServing, string(placement.Mode), nil)
 }
 
 // runCanaries loads and runs md's canary set against the serving pod. A
 // missing, unreadable, or malformed set fails closed: a pod whose quality
 // cannot be verified is not promoted.
-func (r *ModelDeploymentReconciler) runCanaries(ctx context.Context, md *amphorav1alpha1.ModelDeployment, baseURL string) error {
+func (r *ModelDeploymentReconciler) runCanaries(ctx context.Context, md *amphorav1alpha1.ModelDeployment, base PodTarget) error {
 	if r.CanaryRunner == nil {
 		return errors.New("canary evaluation requires a CanaryRunner; refusing to promote without one")
 	}
@@ -122,7 +123,7 @@ func (r *ModelDeploymentReconciler) runCanaries(ctx context.Context, md *amphora
 	if err != nil {
 		return err
 	}
-	return r.CanaryRunner.Run(ctx, baseURL, md.Name, canaries)
+	return r.CanaryRunner.Run(ctx, base, md.Name, canaries)
 }
 
 // failGate is the fail-closed rollback: delete the pod, count the failure,
@@ -149,4 +150,18 @@ func (r *ModelDeploymentReconciler) failGate(ctx context.Context, md *amphorav1a
 		return res, statusErr
 	}
 	return ctrl.Result{RequeueAfter: evalRetryInterval * time.Second}, nil
+}
+
+// podTarget returns where to reach a serving pod: plaintext on the model's
+// own port, or, when the TLS sidecar is enabled, https on the sidecar's port
+// with the tenant's serving-certificate name to verify. The same URL is
+// published as status.endpoint for the proxy.
+func (r *ModelDeploymentReconciler) podTarget(pod *corev1.Pod, namespace string, modelPort int32) PodTarget {
+	if r.PodTLS.Enabled() {
+		return PodTarget{
+			URL:        fmt.Sprintf("https://%s:%d", pod.Status.PodIP, PodTLSPort),
+			ServerName: PodTLSServerName(namespace),
+		}
+	}
+	return PodTarget{URL: fmt.Sprintf("http://%s:%d", pod.Status.PodIP, modelPort)}
 }

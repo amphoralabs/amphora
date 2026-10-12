@@ -1,0 +1,17 @@
+# Encrypted, authenticated transport to model pods (spec §5). A kustomize
+# Component: include it from an overlay of config/default (see
+# config/samples/podtls). It adds the cert-manager CA and the controller and
+# proxy client certificates, and turns on the sidecar in the manager.
+#
+# Prerequisites: cert-manager, and the amphora-podtls image pushed (see the
+# release workflow). Each tenant namespace additionally needs the serving
+# certificate and the TLS-only ingress policy: config/podtls/tenant.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+- pki.yaml
+patches:
+- target:
+    kind: Deployment
+    labelSelector: control-plane=controller-manager
+  path: manager-patch.yaml

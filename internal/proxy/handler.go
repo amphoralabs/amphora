@@ -72,6 +72,11 @@ type Config struct {
 	// Zero uses DefaultMaxDeferredPerModel / DefaultMaxDeferredTotal.
 	MaxDeferredPerModel int
 	MaxDeferredTotal    int
+
+	// UpstreamTLS are the credentials for https upstreams (model pods fronted
+	// by the TLS sidecar, spec §5). Without them an https upstream is refused
+	// rather than reached insecurely.
+	UpstreamTLS *UpstreamTLS
 }
 
 const (
@@ -252,7 +257,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // tagAndProxy attaches cost/audit tags and forwards the request to target.
 func (h *Handler) tagAndProxy(w http.ResponseWriter, r *http.Request, target Target, tenant string) {
-	rp := h.reverseProxyFor(target.Upstream)
+	rp := h.reverseProxyFor(target)
 	if rp == nil {
 		http.Error(w, "invalid upstream target", http.StatusBadGateway)
 		return
@@ -275,17 +280,28 @@ func (h *Handler) tagAndProxy(w http.ResponseWriter, r *http.Request, target Tar
 	rp.ServeHTTP(w, r)
 }
 
-func (h *Handler) reverseProxyFor(upstream string) *httputil.ReverseProxy {
-	if v, ok := h.proxies.Load(upstream); ok {
+func (h *Handler) reverseProxyFor(target Target) *httputil.ReverseProxy {
+	// Keyed by name as well as address: the TLS name verified differs per
+	// tenant even though the upstream URL identifies the pod.
+	key := target.Upstream + "|" + target.ServerName
+	if v, ok := h.proxies.Load(key); ok {
 		return v.(*httputil.ReverseProxy)
 	}
-	u, err := url.Parse(upstream)
+	u, err := url.Parse(target.Upstream)
 	if err != nil || u.Scheme == "" || u.Host == "" {
-		h.logger.Error("invalid upstream URL", "upstream", upstream, "error", err)
+		h.logger.Error("invalid upstream URL", "upstream", target.Upstream, "error", err)
 		return nil
 	}
 	rp := httputil.NewSingleHostReverseProxy(u)
-	actual, _ := h.proxies.LoadOrStore(upstream, rp)
+	if u.Scheme == "https" {
+		transport, err := h.cfg.UpstreamTLS.transport(target.ServerName)
+		if err != nil {
+			h.logger.Error("cannot reach https upstream", "upstream", target.Upstream, "error", err)
+			return nil
+		}
+		rp.Transport = transport
+	}
+	actual, _ := h.proxies.LoadOrStore(key, rp)
 	return actual.(*httputil.ReverseProxy)
 }
 

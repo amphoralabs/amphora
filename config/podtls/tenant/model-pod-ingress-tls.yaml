@@ -1,0 +1,26 @@
+# TLS-only variant of config/networkpolicy/model-pod-ingress.yaml: with the
+# sidecar enabled, only its port is reachable, so the plaintext model port
+# cannot be used to bypass it. Apply INSTEAD of the plain policy, in every
+# namespace that holds ModelDeployments. It only has effect where the CNI
+# enforces NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: amphora-model-pod-ingress
+  labels:
+    app.kubernetes.io/name: amphora
+spec:
+  podSelector:
+    matchExpressions:
+    - key: amphora.amphora.sh/hijacked-by
+      operator: Exists
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: amphora-system
+    ports:
+    - port: 8443
+      protocol: TCP

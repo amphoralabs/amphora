@@ -60,6 +60,7 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var secureMetrics bool
+	var podTLSImage, podTLSSecret, podClientCert, podClientKey, podCA string
 	var enableHTTP2 bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -70,6 +71,14 @@ func main() {
 		"If set the metrics endpoint is served over https and requires an authenticated, authorized caller")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&podTLSImage, "pod-tls-sidecar-image", "",
+		"amphora-podtls image. When set, every serving pod gets a TLS sidecar and the proxy and controller "+
+			"reach models over mutual TLS (spec §5); requires the tenant serving-certificate Secret in each namespace")
+	flag.StringVar(&podTLSSecret, "pod-tls-secret", controller.DefaultPodTLSSecretName,
+		"name of the per-namespace Secret holding the serving certificate (tls.crt, tls.key, ca.crt)")
+	flag.StringVar(&podClientCert, "pod-client-cert", "", "controller client certificate for sidecar-protected pods")
+	flag.StringVar(&podClientKey, "pod-client-key", "", "private key for -pod-client-cert")
+	flag.StringVar(&podCA, "pod-ca", "", "CA bundle pod serving certificates must chain to")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -135,13 +144,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	var podTLS *controller.PodTLSConfig
+	var podClientTLS *controller.PodClientTLS
+	if podTLSImage != "" {
+		if podClientCert == "" || podClientKey == "" || podCA == "" {
+			setupLog.Error(nil, "-pod-tls-sidecar-image requires -pod-client-cert, -pod-client-key and -pod-ca")
+			os.Exit(1)
+		}
+		podTLS = &controller.PodTLSConfig{SidecarImage: podTLSImage, SecretName: podTLSSecret}
+		podClientTLS = &controller.PodClientTLS{CertFile: podClientCert, KeyFile: podClientKey, CAFile: podCA}
+		setupLog.Info("model pod TLS enabled", "sidecarImage", podTLSImage, "secret", podTLSSecret)
+	}
+
 	if err = (&controller.ModelDeploymentReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		Scheduler: scheduler.NewScheduler(metrics.Registry),
 
-		EvalProber:   &controller.HTTPEvalProber{},
-		CanaryRunner: &controller.HTTPCanaryRunner{},
+		EvalProber:   &controller.HTTPEvalProber{TLS: podClientTLS},
+		CanaryRunner: &controller.HTTPCanaryRunner{TLS: podClientTLS},
+		PodTLS:       podTLS,
 		APIReader:    mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ModelDeployment")
@@ -150,6 +172,7 @@ func main() {
 	if err = (&controller.PausePoolReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		PodTLS: podTLS,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PausePool")
 		os.Exit(1)
@@ -160,6 +183,13 @@ func main() {
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
 		if err = amphorawebhook.SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhooks")
+			os.Exit(1)
+		}
+		// Not Ready until the webhook server is actually listening. With
+		// failurePolicy Fail, a pod that is Ready but not yet serving the
+		// webhook makes every create/update fail for the duration of a rollout.
+		if err = mgr.AddReadyzCheck("webhook", webhookServer.StartedChecker()); err != nil {
+			setupLog.Error(err, "unable to set up webhook ready check")
 			os.Exit(1)
 		}
 	}

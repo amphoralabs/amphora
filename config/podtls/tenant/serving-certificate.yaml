@@ -1,0 +1,28 @@
+# Per-tenant serving certificate for model pods. Apply in EVERY namespace that
+# holds ModelDeployments, with the namespace substituted (the DNS name must
+# be <namespace>.model.amphora.internal: the proxy and controller verify it, so
+# a pod can only present its own tenant's identity):
+#
+#   NS=team-a
+#   sed "s/NAMESPACE/$NS/g" config/podtls/tenant/serving-certificate.yaml \
+#     | kubectl apply -n "$NS" -f -
+#
+# Pods mount the resulting Secret by this fixed name (it is declared when the
+# pod is created and cannot change afterwards), and stay in ContainerCreating
+# until it exists, so a namespace without it fails closed instead of serving
+# plaintext.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: amphora-model-tls
+spec:
+  secretName: amphora-model-tls
+  dnsNames:
+  - NAMESPACE.model.amphora.internal
+  usages: [server auth, digital signature]
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: amphora-ca
+    kind: ClusterIssuer

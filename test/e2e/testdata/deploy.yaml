@@ -52,6 +52,9 @@ spec:
         image: amphora-manager:e2e
         imagePullPolicy: IfNotPresent
         args: ["--leader-elect=false", "--metrics-bind-address=:8443", "--metrics-secure"]
+        readinessProbe:
+          httpGet: {path: /readyz, port: 8081}
+          periodSeconds: 2
         ports:
         - containerPort: 9443
         - containerPort: 8443

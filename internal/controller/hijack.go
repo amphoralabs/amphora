@@ -264,6 +264,10 @@ func (r *ModelDeploymentReconciler) coldCreatePod(ctx context.Context, md *ampho
 			}},
 		},
 	}
+	if r.PodTLS.Enabled() {
+		pod.Spec.Containers = append(pod.Spec.Containers, r.PodTLS.sidecar(probePortFor(md)))
+		pod.Spec.Volumes = append(pod.Spec.Volumes, r.PodTLS.volume())
+	}
 	if err := controllerutil.SetControllerReference(md, pod, r.Scheme); err != nil {
 		return "", fmt.Errorf("setting ModelDeployment owner reference: %w", err)
 	}

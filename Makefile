@@ -169,6 +169,7 @@ bench-coldstart: fmt vet ## Run the Phase 1 concurrent cold-start benchmark (see
 .PHONY: kustomize-check
 kustomize-check: kustomize ## Fail if the deployable config (config/default) does not build.
 	$(KUSTOMIZE) build config/default > /dev/null
+	$(KUSTOMIZE) build config/samples/podtls > /dev/null
 
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.

@@ -54,12 +54,18 @@ func ApplyModelDeployment(reg *Registry, md *amphorav1alpha1.ModelDeployment, lo
 		return
 	}
 	u, err := url.Parse(md.Status.Endpoint)
-	if err != nil || u.Scheme != "http" || u.Host == "" {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		logger.Error("ignoring Serving deployment with invalid endpoint", "model", key, "endpoint", md.Status.Endpoint)
 		reg.MarkCold(key)
 		return
 	}
-	reg.MarkWarm(Target{Model: key, Tenant: md.Namespace, Upstream: md.Status.Endpoint})
+	target := Target{Model: key, Tenant: md.Namespace, Upstream: md.Status.Endpoint}
+	if u.Scheme == "https" {
+		// The pod fronts its model with the TLS sidecar; verify the tenant's
+		// serving-certificate name, not the pod IP.
+		target.ServerName = controller.PodTLSServerName(md.Namespace)
+	}
+	reg.MarkWarm(target)
 }
 
 // SyncFromCluster keeps reg in step with ModelDeployment status by watching

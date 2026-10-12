@@ -50,24 +50,29 @@ const (
 // EvalProber runs one gate probe against a serving pod's URL. A nil error
 // means the probe passed within ctx's deadline.
 type EvalProber interface {
-	Probe(ctx context.Context, url string) error
+	Probe(ctx context.Context, target PodTarget) error
 }
 
 // HTTPEvalProber is the default latency-only probe (§3.2.1): a GET that must
 // return 2xx before the gate deadline. It does not verify output quality;
 // callers must record that ("quality unverified") rather than imply it.
 type HTTPEvalProber struct {
+	// Client is used for plaintext (http) targets; nil uses a default.
 	Client *http.Client
+	// TLS holds the client credentials for sidecar-protected (https) pods.
+	TLS *PodClientTLS
 }
 
 // Probe implements EvalProber. Redirects are not followed: the target is a
-// pod IP taken from the apiserver and must not be steerable elsewhere.
-func (p *HTTPEvalProber) Probe(ctx context.Context, url string) error {
-	client := p.Client
-	if client == nil {
-		client = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+// pod IP taken from the apiserver and must not be steerable elsewhere. An
+// https target is called with the controller's client certificate and the
+// pod's certificate is verified against the pod CA.
+func (p *HTTPEvalProber) Probe(ctx context.Context, target PodTarget) error {
+	client, err := clientFor(p.Client, p.TLS, target)
+	if err != nil {
+		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.URL, http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -77,7 +82,7 @@ func (p *HTTPEvalProber) Probe(ctx context.Context, url string) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("probe %s returned status %d", url, resp.StatusCode)
+		return fmt.Errorf("probe %s returned status %d", target.URL, resp.StatusCode)
 	}
 	return nil
 }

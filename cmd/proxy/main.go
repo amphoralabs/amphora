@@ -55,6 +55,9 @@ func main() {
 		tlsCert           string
 		tlsKey            string
 		tlsClientCA       string
+		upstreamCert      string
+		upstreamKey       string
+		upstreamCA        string
 	)
 	flag.StringVar(&addr, "addr", ":8080", "address to listen on for inbound inference traffic")
 	flag.DurationVar(&deferralTimeout, "deferral-timeout", proxy.DefaultDeferralTimeout,
@@ -70,6 +73,10 @@ func main() {
 	flag.StringVar(&tlsClientCA, "tls-client-ca", "",
 		"require clients to present a certificate signed by this CA bundle; the tenant is then taken from the "+
 			"certificate's common name and a tenant may only reach its own models (spec §5)")
+	flag.StringVar(&upstreamCert, "upstream-client-cert", "",
+		"client certificate presented to model pods fronted by the TLS sidecar (re-read on change)")
+	flag.StringVar(&upstreamKey, "upstream-client-key", "", "private key for -upstream-client-cert")
+	flag.StringVar(&upstreamCA, "upstream-ca", "", "CA bundle model-pod serving certificates must chain to")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -87,9 +94,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	var upstreamTLS *proxy.UpstreamTLS
+	if upstreamCert != "" || upstreamKey != "" || upstreamCA != "" {
+		if upstreamCert == "" || upstreamKey == "" || upstreamCA == "" {
+			logger.Error("-upstream-client-cert, -upstream-client-key and -upstream-ca must be set together")
+			os.Exit(1)
+		}
+		upstreamTLS = &proxy.UpstreamTLS{CertFile: upstreamCert, KeyFile: upstreamKey, CAFile: upstreamCA}
+	}
+
 	handler := proxy.NewHandler(registry, notifier, proxy.Config{
 		DeferralTimeout:       deferralTimeout,
 		RequireClientIdentity: tlsClientCA != "",
+		UpstreamTLS:           upstreamTLS,
 	}, registerer, logger)
 
 	mux := http.NewServeMux()

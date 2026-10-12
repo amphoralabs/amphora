@@ -1,0 +1,69 @@
+# Private CA for model-pod TLS, and the proxy and controller client
+# certificates. All issued by cert-manager and rotated by it; the sidecar,
+# proxy and controller re-read the files on renewal.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: amphora-selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: amphora-pod-ca
+  namespace: cert-manager   # a ClusterIssuer's CA Secret must live in cert-manager's namespace
+spec:
+  isCA: true
+  commonName: amphora-pod-ca
+  secretName: amphora-pod-ca
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: amphora-selfsigned
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: amphora-ca
+spec:
+  ca:
+    secretName: amphora-pod-ca
+---
+# The controller's client certificate. The sidecar admits callers by common
+# name (-allowed-clients, default "amphora-proxy,amphora-controller").
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: amphora-controller-client
+  namespace: amphora-system   # where config/default installs the manager and proxy
+spec:
+  commonName: amphora-controller
+  secretName: amphora-controller-client
+  usages: [client auth, digital signature]
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: amphora-ca
+    kind: ClusterIssuer
+---
+# The proxy's client certificate. The proxy Deployment mounts this Secret and
+# is started with -upstream-client-cert/-upstream-client-key/-upstream-ca.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: amphora-proxy-client
+  namespace: amphora-system   # where config/default installs the manager and proxy
+spec:
+  commonName: amphora-proxy
+  secretName: amphora-proxy-client
+  usages: [client auth, digital signature]
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: amphora-ca
+    kind: ClusterIssuer
