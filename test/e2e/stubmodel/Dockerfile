@@ -1,5 +1,5 @@
 # Build context is the repo root: docker build -f test/e2e/stubmodel/Dockerfile .
-FROM golang:1.26.8 AS builder
+FROM golang:1.26.9 AS builder
 WORKDIR /workspace
 COPY go.mod go.mod
 COPY go.sum go.sum
