@@ -1,0 +1,23 @@
+# The proxy presents amphora-proxy-client to the sidecar and verifies the
+# tenant's serving certificate against the same CA.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: -upstream-client-cert=/upstream-tls/tls.crt
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: -upstream-client-key=/upstream-tls/tls.key
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: -upstream-ca=/upstream-tls/ca.crt
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts
+  value:
+  - name: upstream-tls
+    mountPath: /upstream-tls
+    readOnly: true
+- op: add
+  path: /spec/template/spec/volumes
+  value:
+  - name: upstream-tls
+    secret:
+      secretName: amphora-proxy-client

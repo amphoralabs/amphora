@@ -18,6 +18,7 @@ resources:
 - ../crd
 - ../rbac
 - ../manager
+- ../proxy
 - ../webhook
 - ../certmanager
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in

@@ -69,7 +69,8 @@ gRPC link, so there is also no proxy → controller wakeup path yet (nothing sca
 ## What works today
 
 All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
-(`make test-e2e`, 24 specs, also run in CI):
+(`make test-e2e`, 24 specs, also run in CI; `make test-deploy` additionally installs the shipped
+manifests with a real cert-manager):
 
 - **`ModelDeployment` CRD** (`amphora.amphora.sh/v1alpha1`) with an immutable `tenancyClass`
   (`SingleTenant` / `TrustedMultiTenant` / `RegulatedMultiTenant`), `gpuFraction` (MIG profile),
@@ -155,11 +156,13 @@ All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
   hand-built RPC channel would be a new spoofable endpoint ([#30](https://github.com/amphoralabs/amphora/issues/30)).
 - **Client authentication is certificate-only** (no OIDC or API keys), and the tenant must equal
   the model's namespace. A single client certificate cannot span several tenants.
-- The webhook's cert-manager certificate path is build-checked but not exercised in CI (the e2e
-  mints its own certificates).
-- `config/default` is build-checked in CI but never deployed there (the e2e uses its own
-  manifests and certificates), and the tag-triggered release workflow (manager and proxy images,
-  signed, with SBOMs) has not been run yet.
+- cert-manager issuance of the webhook, PKI and per-tenant serving certificates is exercised
+  only by `make test-deploy` against cert-manager v1.21.2 (pinned, fetched over the network); the
+  main e2e mints its own certificates.
+- The shipped install (`config/samples/podtls`: manager, proxy, webhook, PKI, TLS sidecar) is
+  deployed and checked by `make test-deploy` (a separate CI job) on a single-node kind cluster
+  with no real GPU. The tag-triggered release workflow (manager, proxy and podtls images, signed,
+  with SBOMs) has not been run yet.
 
 ## Try it
 
@@ -169,7 +172,8 @@ Requires Go (see `go.mod`) and, for the end-to-end suite, Docker.
 make test        # unit + envtest (downloads Kubernetes control-plane binaries)
 make test-e2e    # builds images, creates a throwaway kind cluster, runs the full path, deletes it
 make lint        # golangci-lint
-make kustomize-check   # config/default must build
+make kustomize-check   # config/default must build, with no dangling references
+make test-deploy       # installs the shipped manifests with a real cert-manager (needs network)
 ```
 
 `make test-e2e` uses its own kubeconfig under `bin/` and refuses to run against any other
