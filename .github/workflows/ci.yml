@@ -83,3 +83,19 @@ jobs:
           cache: true
       - name: e2e
         run: make test-e2e
+
+  deploy:
+    # Installs the manifests that ship in config/ onto a throwaway kind cluster with a real
+    # cert-manager (fetched from the network) and checks they work. The e2e job hand-writes its
+    # own manifests and mints its own certificates, so it cannot catch a broken install path.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: deploy
+        run: make test-deploy
+

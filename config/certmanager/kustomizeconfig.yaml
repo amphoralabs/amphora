@@ -1,0 +1,12 @@
+# kustomize does not know that a cert-manager Certificate's issuerRef.name is a
+# reference to an Issuer, so it does not follow the name prefix applied by
+# config/default. Without this the Certificate keeps asking for
+# "selfsigned-issuer" while the Issuer is renamed, and the webhook's serving
+# certificate is never issued.
+nameReference:
+- kind: Issuer
+  group: cert-manager.io
+  fieldSpecs:
+  - kind: Certificate
+    group: cert-manager.io
+    path: spec/issuerRef/name

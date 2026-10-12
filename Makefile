@@ -114,7 +114,7 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v -e /e2e -e /deploy) -coverprofile cover.out
 
 # Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
 # e2e runs against its own throwaway kind cluster and its own kubeconfig, so it can never touch
@@ -132,6 +132,21 @@ test-e2e: kind
 	KUBECONFIG=$(E2E_KUBECONFIG) E2E_KIND_CLUSTER=$(E2E_CLUSTER) KIND=$(KIND) \
 		go test ./test/e2e/ -v -ginkgo.v -timeout 20m || rc=$$?; \
 	if [ -z "$(E2E_KEEP)" ]; then $(KIND) delete cluster --name $(E2E_CLUSTER); fi; exit $$rc
+
+# Installs the manifests that ship in config/ (config/samples/podtls) onto a throwaway kind
+# cluster with a real cert-manager (fetched from the network), and checks that it works. Slower
+# than test-e2e and needs network access; uses its own kubeconfig and refuses any other context.
+DEPLOY_CLUSTER ?= amphora-deploy
+DEPLOY_KUBECONFIG ?= $(LOCALBIN)/deploy-kubeconfig
+
+.PHONY: test-deploy
+test-deploy: kind kustomize
+	$(KIND) delete cluster --name $(DEPLOY_CLUSTER) || true
+	$(KIND) create cluster --name $(DEPLOY_CLUSTER) --kubeconfig $(DEPLOY_KUBECONFIG) --wait 120s
+	rc=0; \
+	KUBECONFIG=$(DEPLOY_KUBECONFIG) DEPLOY_KIND_CLUSTER=$(DEPLOY_CLUSTER) KIND=$(KIND) KUSTOMIZE=$(KUSTOMIZE) \
+		go test ./test/deploy/ -v -ginkgo.v -timeout 30m || rc=$$?; \
+	if [ -z "$(E2E_KEEP)" ]; then $(KIND) delete cluster --name $(DEPLOY_CLUSTER); fi; exit $$rc
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter & yamllint
@@ -168,8 +183,8 @@ bench-coldstart: fmt vet ## Run the Phase 1 concurrent cold-start benchmark (see
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: kustomize-check
 kustomize-check: kustomize ## Fail if the deployable config (config/default) does not build.
-	$(KUSTOMIZE) build config/default > /dev/null
-	$(KUSTOMIZE) build config/samples/podtls > /dev/null
+	$(KUSTOMIZE) build config/default | python3 hack/check-rendered.py
+	$(KUSTOMIZE) build config/samples/podtls | python3 hack/check-rendered.py
 
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
