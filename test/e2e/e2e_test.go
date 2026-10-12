@@ -76,6 +76,16 @@ func viaProxy(podName, model string, maxSeconds int) (string, error) {
 	return curlPod(podName, maxSeconds, "-sS", "-m", fmt.Sprint(maxSeconds), "-H", "X-Amphora-Model: "+model, proxyURL)
 }
 
+// statusViaProxy returns the HTTP status the proxy gives for model, failing
+// the spec if the request itself errors (e.g. times out because it was held).
+func statusViaProxy(podName, model string) string {
+	GinkgoHelper()
+	out, err := curlPod(podName, 20, "-sS", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}",
+		"-H", "X-Amphora-Model: "+model, proxyURL)
+	Expect(err).NotTo(HaveOccurred(), out)
+	return out
+}
+
 // curlPod runs curl with args in a throwaway in-cluster pod and returns its
 // stdout. A non-zero curl exit (e.g. timeout) is returned as an error.
 func curlPod(podName string, maxSeconds int, curlArgs ...string) (string, error) {
@@ -266,7 +276,12 @@ var _ = Describe("controller + proxy on a real cluster", Ordered, func() {
 	It("cold-creates a pod, passes the eval gate, defers then routes a request, and stops routing after delete", func() {
 		const name = "e2e-cold"
 
-		By("sending a request BEFORE the model exists: the proxy must hold it open (connection deferral)")
+		By("creating a deployment that exists but cannot be placed yet (its only allowed region matches no node)")
+		apply(modelDeploymentInRegions(name, "us-east-1"))
+		Eventually(func() string { return field(kindMD, name, "{.status.phase}") }, time.Minute, 2*time.Second).
+			Should(Equal("Pending"))
+
+		By("a request for it is held open: it exists, it just is not ready (connection deferral)")
 		type result struct {
 			out string
 			err error
@@ -277,10 +292,10 @@ var _ = Describe("controller + proxy on a real cluster", Ordered, func() {
 			out, err := viaProxy("curl-deferred", modelKeyPrefix+name, 115)
 			done <- result{out, err}
 		}()
-		time.Sleep(5 * time.Second)
+		time.Sleep(8 * time.Second) // long enough for the curl pod to start and park
 
-		By("creating the ModelDeployment")
-		apply(modelDeployment(name))
+		By("allowing the node's region lets it be placed, cold-created, and gated")
+		kubectl("patch", kindMD, name, "-n", nsDefault, "--type=merge", "-p", `{"spec":{"allowedRegions":["eu-west-1"]}}`)
 
 		By("waiting for the eval gate to promote it to Serving")
 		Eventually(func() string { return field(kindMD, name, "{.status.phase}") }, 4*time.Minute, 3*time.Second).
@@ -294,10 +309,16 @@ var _ = Describe("controller + proxy on a real cluster", Ordered, func() {
 		Expect(r.err).NotTo(HaveOccurred(), r.out)
 		Expect(r.out).To(ContainSubstring("model=" + name))
 
-		By("deleting the deployment makes the proxy stop routing to it")
+		By("deleting the deployment makes the model unknown: an immediate 404, not a held connection")
 		deleteAndWait(kindMD, name)
-		out, err := viaProxy("curl-after-delete", modelKeyPrefix+name, 5)
-		Expect(err).To(HaveOccurred(), "request unexpectedly succeeded after delete: %s", out)
+		Eventually(func() string { return statusViaProxy("curl-after-delete", modelKeyPrefix+name) },
+			30*time.Second, 2*time.Second).Should(Equal("404"))
+	})
+
+	It("answers 404 immediately for a model that does not exist instead of parking the connection", func() {
+		// The proxy's deferral timeout is 120s; a held connection would hit
+		// curl's 20s limit and fail, so a clean 404 proves it was not parked.
+		Expect(statusViaProxy("curl-unknown", modelKeyPrefix+"does-not-exist")).To(Equal("404"))
 	})
 
 	It("hijacks an idle PausePool pod and the hijacked container learns its model identity", func() {
