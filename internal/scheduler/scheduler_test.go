@@ -30,6 +30,8 @@ import (
 const (
 	testNodeID = "gpu-0"
 	regionUS   = "us-east-1"
+	nodeBig    = "big"
+	nodeSmall  = "small"
 	regionEU   = "eu-west-1"
 )
 
@@ -470,26 +472,26 @@ func TestRelabeledNodeTriggersViolationOnNextPlace(t *testing.T) {
 
 func TestRestoreRecordsPlacementAtObservedNode(t *testing.T) {
 	s := newTestScheduler(t)
-	mustRegisterNode(t, s, NodeSpec{ID: "big", TotalVRAMMB: 80_000})
-	mustRegisterNode(t, s, NodeSpec{ID: "small", TotalVRAMMB: 40_000}) // best-fit would prefer this one
+	mustRegisterNode(t, s, NodeSpec{ID: nodeBig, TotalVRAMMB: 80_000})
+	mustRegisterNode(t, s, NodeSpec{ID: nodeSmall, TotalVRAMMB: 40_000}) // best-fit would prefer this one
 	req := PlacementRequest{Model: "a", TenancyClass: amphorav1alpha1.TenancySingleTenant, VRAMMB: 10_000}
 
-	p, err := s.Restore(req, "big")
-	if err != nil || p.NodeID != "big" {
+	p, err := s.Restore(req, nodeBig)
+	if err != nil || p.NodeID != nodeBig {
 		t.Fatalf("Restore = %+v, %v; want recorded on big", p, err)
 	}
-	if got, _ := s.Placement("a"); got.NodeID != "big" {
+	if got, _ := s.Placement("a"); got.NodeID != nodeBig {
 		t.Fatalf("Placement = %+v, want node big", got)
 	}
 	// Idempotent at the same node; a different observed node is a conflict.
-	if _, err := s.Restore(req, "big"); err != nil {
+	if _, err := s.Restore(req, nodeBig); err != nil {
 		t.Fatalf("repeat Restore = %v, want nil", err)
 	}
-	if _, err := s.Restore(req, "small"); !errors.Is(err, ErrRestoreConflict) {
+	if _, err := s.Restore(req, nodeSmall); !errors.Is(err, ErrRestoreConflict) {
 		t.Fatalf("Restore at a different node = %v, want ErrRestoreConflict", err)
 	}
 	// And Place keeps honoring the restored placement.
-	if p, err := s.Place(req); err != nil || p.NodeID != "big" {
+	if p, err := s.Place(req); err != nil || p.NodeID != nodeBig {
 		t.Fatalf("Place after Restore = %+v, %v; want big", p, err)
 	}
 }
