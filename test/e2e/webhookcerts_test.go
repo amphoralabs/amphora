@@ -80,8 +80,8 @@ func webhookCerts(dnsNames ...string) (caPEM, certPEM, keyPEM []byte, err error)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}),
-		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srvDER}),
+	return pem.EncodeToMemory(&pem.Block{Type: pemTypeCertificate, Bytes: caDER}),
+		pem.EncodeToMemory(&pem.Block{Type: pemTypeCertificate, Bytes: srvDER}),
 		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), nil
 }
 

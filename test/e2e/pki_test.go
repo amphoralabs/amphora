@@ -27,6 +27,9 @@ import (
 	"time"
 )
 
+// pemTypeCertificate is the PEM block type of an X.509 certificate.
+const pemTypeCertificate = "CERTIFICATE"
+
 // testCA is a throwaway CA for e2e: it signs the mTLS proxy's serving
 // certificate and the per-tenant client certificates.
 type testCA struct {
@@ -54,7 +57,7 @@ func newTestCA(name string) (*testCA, error) {
 	if err != nil {
 		return nil, err
 	}
-	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: pemTypeCertificate, Bytes: der})
 	return &testCA{cert: cert, key: key, PEM: caPEM, next: 1}, nil
 }
 
@@ -78,6 +81,6 @@ func (c *testCA) issue(cn string, usage x509.ExtKeyUsage, dnsNames ...string) (c
 	if err != nil {
 		return nil, nil, err
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+	return pem.EncodeToMemory(&pem.Block{Type: pemTypeCertificate, Bytes: der}),
 		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), nil
 }

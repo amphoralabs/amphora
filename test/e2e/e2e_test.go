@@ -33,6 +33,9 @@ import (
 
 const (
 	nsDefault      = "default"
+	phaseFailed    = "Failed"
+	phaseSucceeded = "Succeeded"
+	keyName        = "name"
 	kubectlBin     = "kubectl"
 	verbGet        = "get"
 	verbDelete     = "delete"
@@ -85,9 +88,9 @@ func curlPod(podName string, maxSeconds int, curlArgs ...string) (string, error)
 	deadline := time.Now().Add(time.Duration(maxSeconds+90) * time.Second)
 	for time.Now().Before(deadline) {
 		phase, _ := kubectlTry("get", "pod", podName, "-n", "default", "-o", "jsonpath={.status.phase}")
-		if phase == "Succeeded" || phase == "Failed" {
+		if phase == phaseSucceeded || phase == phaseFailed {
 			logs, _ := kubectlTry("logs", podName, "-n", "default")
-			if phase == "Failed" {
+			if phase == phaseFailed {
 				return logs, fmt.Errorf("curl pod failed: %s", logs)
 			}
 			return logs, nil
@@ -231,7 +234,7 @@ spec:
 // cold-created).
 func hijackedPods(md string) int {
 	out, _ := kubectlTry(verbGet, "pods", "-n", nsDefault, "-l", "amphora.amphora.sh/hijacked-by="+md,
-		"--field-selector=status.phase!=Failed", "-o", "name")
+		"--field-selector=status.phase!=Failed", "-o", keyName)
 	return len(strings.Fields(out))
 }
 
@@ -599,10 +602,10 @@ subjects:
 			// rather than merges, the generated container list.
 			spec := map[string]any{"spec": map[string]any{
 				"restartPolicy": "Never",
-				"volumes":       []any{map[string]any{"name": "c", "secret": map[string]any{"secretName": secret}}},
+				"volumes":       []any{map[string]any{keyName: "c", "secret": map[string]any{"secretName": secret}}},
 				"containers": []any{map[string]any{
-					"name": pod, "image": "curlimages/curl:8.10.1", "command": []string{"curl"}, "args": curlArgs,
-					"volumeMounts": []any{map[string]any{"name": "c", "mountPath": "/c"}},
+					keyName: pod, "image": "curlimages/curl:8.10.1", "command": []string{"curl"}, "args": curlArgs,
+					"volumeMounts": []any{map[string]any{keyName: "c", "mountPath": "/c"}},
 				}},
 			}}
 			overrides, err := json.Marshal(spec)
@@ -617,9 +620,9 @@ subjects:
 			deadline := time.Now().Add(90 * time.Second)
 			for time.Now().Before(deadline) {
 				phase, _ := kubectlTry(verbGet, "pod", pod, "-n", nsDefault, "-o", "jsonpath={.status.phase}")
-				if phase == "Succeeded" || phase == "Failed" {
+				if phase == phaseSucceeded || phase == phaseFailed {
 					logs, _ := kubectlTry("logs", pod, "-n", nsDefault)
-					if phase == "Failed" {
+					if phase == phaseFailed {
 						return logs, fmt.Errorf("curl failed: %s", logs)
 					}
 					return logs, nil
@@ -715,7 +718,8 @@ spec:
 		})
 
 		It("serves a tenant its own model, and the model sees the request", func() {
-			args := []string{"-sS", "-m", "20", "--cacert", "/c/ca.crt"}
+			args := make([]string, 0, 8+len(withCert))
+			args = append(args, "-sS", "-m", "20", "--cacert", "/c/ca.crt")
 			args = append(args, withCert...)
 			args = append(args, "-H", "X-Amphora-Model: "+modelKeyPrefix+model, mtlsHost)
 			out, err := curlTLS("mtls-own", "mtls-client-default", args...)
