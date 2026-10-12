@@ -38,6 +38,9 @@ type Target struct {
 	Tenant string
 	// Upstream is the target's base URL (e.g. "http://10.0.0.5:8000").
 	Upstream string
+	// ServerName is the TLS name to verify when Upstream is https: the
+	// tenant's serving-certificate name. Empty for plaintext upstreams.
+	ServerName string
 }
 
 // Registry tracks which models currently have a warm (ready-to-serve)

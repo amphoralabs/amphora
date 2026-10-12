@@ -1,0 +1,6 @@
+# Example overlay: config/default with model-pod TLS enabled. Built in CI by
+# `make kustomize-check` so the component keeps working.
+resources:
+- ../../default
+components:
+- ../../podtls

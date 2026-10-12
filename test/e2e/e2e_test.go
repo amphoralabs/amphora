@@ -36,6 +36,9 @@ const (
 	phaseFailed    = "Failed"
 	phaseSucceeded = "Succeeded"
 	keyName        = "name"
+	keyCACrt       = "ca.crt"
+	keyTLSCrt      = "tls.crt"
+	keyTLSKey      = "tls.key"
 	kubectlBin     = "kubectl"
 	verbGet        = "get"
 	verbDelete     = "delete"
@@ -110,6 +113,51 @@ func curlPod(podName string, maxSeconds int, curlArgs ...string) (string, error)
 	return "", fmt.Errorf("curl pod %s did not finish", podName)
 }
 
+// secretManifest renders an Opaque Secret from raw byte values.
+func secretManifest(name, ns string, kv map[string][]byte) string {
+	s := fmt.Sprintf("apiVersion: v1\nkind: Secret\nmetadata: {name: %s, namespace: %s}\ndata:\n", name, ns)
+	for k, v := range kv {
+		s += fmt.Sprintf("  %s: %s\n", k, base64.StdEncoding.EncodeToString(v))
+	}
+	return s
+}
+
+// curlTLS runs curl in a pod with the named Secret mounted at /c.
+func curlTLS(pod, secret string, curlArgs ...string) (string, error) {
+	// The container is defined whole in the override: kubectl replaces,
+	// rather than merges, the generated container list.
+	spec := map[string]any{"spec": map[string]any{
+		"restartPolicy": "Never",
+		"volumes":       []any{map[string]any{keyName: "c", "secret": map[string]any{"secretName": secret}}},
+		"containers": []any{map[string]any{
+			keyName: pod, "image": "curlimages/curl:8.10.1", "command": []string{"curl"}, "args": curlArgs,
+			"volumeMounts": []any{map[string]any{keyName: "c", "mountPath": "/c"}},
+		}},
+	}}
+	overrides, err := json.Marshal(spec)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _, _ = kubectlTry("delete", "pod", pod, "-n", nsDefault, "--ignore-not-found", "--now") }()
+	if out, err := kubectlTry("run", pod, "--restart=Never", "-n", nsDefault,
+		"--image=curlimages/curl:8.10.1", "--overrides="+string(overrides)); err != nil {
+		return out, err
+	}
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		phase, _ := kubectlTry(verbGet, "pod", pod, "-n", nsDefault, "-o", "jsonpath={.status.phase}")
+		if phase == phaseSucceeded || phase == phaseFailed {
+			logs, _ := kubectlTry("logs", pod, "-n", nsDefault)
+			if phase == phaseFailed {
+				return logs, fmt.Errorf("curl failed: %s", logs)
+			}
+			return logs, nil
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return "", fmt.Errorf("pod %s did not finish", pod)
+}
+
 func field(kind, name, jsonpath string) string {
 	out, _ := kubectlTry(verbGet, kind, name, "-n", nsDefault, "-o", "jsonpath="+jsonpath)
 	return out
@@ -131,13 +179,15 @@ var _ = BeforeSuite(func() {
 		{verbBuild, "-q", "-t", "amphora-manager:e2e", "."},
 		{verbBuild, "-q", "-t", "amphora-proxy:e2e", "-f", "Dockerfile.proxy", "."},
 		{verbBuild, "-q", "-t", "amphora-stubmodel:e2e", "-f", "test/e2e/stubmodel/Dockerfile", "."},
+		{verbBuild, "-q", "-t", "amphora-podtls:e2e", "-f", "Dockerfile.podtls", "."},
 	} {
 		cmd := exec.Command("docker", args...)
 		cmd.Dir = "../.."
 		out, err := cmd.CombinedOutput()
 		Expect(err).NotTo(HaveOccurred(), "docker %v:\n%s", args, out)
 	}
-	for _, img := range []string{"amphora-manager:e2e", "amphora-proxy:e2e", "amphora-stubmodel:e2e"} {
+	images := []string{"amphora-manager:e2e", "amphora-proxy:e2e", "amphora-stubmodel:e2e", "amphora-podtls:e2e"}
+	for _, img := range images {
 		out, err := run(kind, "load", "docker-image", img, "--name", cluster)
 		Expect(err).NotTo(HaveOccurred(), "kind load %s:\n%s", img, out)
 	}
@@ -180,6 +230,7 @@ data:
 	webhookConfig, err := webhookConfigFor("../../config/webhook/manifests.yaml", "webhook-service", systemNS, caPEM)
 	Expect(err).NotTo(HaveOccurred())
 	apply(webhookConfig)
+	waitForAdmission()
 })
 
 var _ = AfterSuite(func() {
@@ -246,6 +297,23 @@ func hijackedPods(md string) int {
 	out, _ := kubectlTry(verbGet, "pods", "-n", nsDefault, "-l", "amphora.amphora.sh/hijacked-by="+md,
 		"--field-selector=status.phase!=Failed", "-o", keyName)
 	return len(strings.Fields(out))
+}
+
+// waitForAdmission blocks until a create is admitted end to end through the
+// webhook (server-side dry run). Pod readiness is not enough: after a rollout
+// the Service can still reject connections for a moment while routing catches
+// up, and with failurePolicy Fail that fails every create.
+func waitForAdmission() {
+	GinkgoHelper()
+	Eventually(func() error {
+		cmd := exec.Command(kubectlBin, verbApply, "--dry-run=server", "-f", "-")
+		cmd.Stdin = strings.NewReader(modelDeployment("admission-warmup"))
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%w: %s", err, out)
+		}
+		return nil
+	}, 90*time.Second, 2*time.Second).Should(Succeed(), "the admission webhook never became reachable")
 }
 
 func apply(manifest string) {
@@ -617,41 +685,6 @@ subjects:
 			mtlsHost = "https://proxy-mtls.amphora-system.svc:8443/"
 			model    = "e2e-mtls"
 		)
-		// curlTLS runs curl in a pod with the named client Secret mounted at /c.
-		curlTLS := func(pod, secret string, curlArgs ...string) (string, error) {
-			// The container is defined whole in the override: kubectl replaces,
-			// rather than merges, the generated container list.
-			spec := map[string]any{"spec": map[string]any{
-				"restartPolicy": "Never",
-				"volumes":       []any{map[string]any{keyName: "c", "secret": map[string]any{"secretName": secret}}},
-				"containers": []any{map[string]any{
-					keyName: pod, "image": "curlimages/curl:8.10.1", "command": []string{"curl"}, "args": curlArgs,
-					"volumeMounts": []any{map[string]any{keyName: "c", "mountPath": "/c"}},
-				}},
-			}}
-			overrides, err := json.Marshal(spec)
-			if err != nil {
-				return "", err
-			}
-			defer func() { _, _ = kubectlTry("delete", "pod", pod, "-n", nsDefault, "--ignore-not-found", "--now") }()
-			if out, err := kubectlTry("run", pod, "--restart=Never", "-n", nsDefault,
-				"--image=curlimages/curl:8.10.1", "--overrides="+string(overrides)); err != nil {
-				return out, err
-			}
-			deadline := time.Now().Add(90 * time.Second)
-			for time.Now().Before(deadline) {
-				phase, _ := kubectlTry(verbGet, "pod", pod, "-n", nsDefault, "-o", "jsonpath={.status.phase}")
-				if phase == phaseSucceeded || phase == phaseFailed {
-					logs, _ := kubectlTry("logs", pod, "-n", nsDefault)
-					if phase == phaseFailed {
-						return logs, fmt.Errorf("curl failed: %s", logs)
-					}
-					return logs, nil
-				}
-				time.Sleep(2 * time.Second)
-			}
-			return "", fmt.Errorf("pod %s did not finish", pod)
-		}
 		status := func(pod, secret, modelKey string, extra ...string) string {
 			GinkgoHelper()
 			args := append([]string{"-sS", "-m", "20", "--cacert", "/c/ca.crt", "-o", "/dev/null", "-w", "%{http_code}",
@@ -676,14 +709,14 @@ subjects:
 				return s
 			}
 			manifest := secret("proxy-mtls-tls", systemNS, map[string][]byte{
-				"tls.crt": srvCert, "tls.key": srvKey, "ca.crt": ca.PEM,
+				keyTLSCrt: srvCert, keyTLSKey: srvKey, keyCACrt: ca.PEM,
 			})
 			for _, tenant := range []string{"default", "other"} {
 				cert, key, err := ca.issue(tenant, x509.ExtKeyUsageClientAuth)
 				Expect(err).NotTo(HaveOccurred())
 				// ca.crt here is what the client uses to verify the proxy.
 				manifest += "---\n" + secret("mtls-client-"+tenant, nsDefault, map[string][]byte{
-					"tls.crt": cert, "tls.key": key, "ca.crt": ca.PEM,
+					keyTLSCrt: cert, keyTLSKey: key, keyCACrt: ca.PEM,
 				})
 			}
 			manifest += `---
@@ -786,6 +819,165 @@ spec:
 			out, err = viaProxy("curl-proxied-after", modelKeyPrefix+md, 20)
 			Expect(err).NotTo(HaveOccurred(), out)
 			Expect(out).To(ContainSubstring("model=" + md))
+		})
+	})
+
+	Context("encrypted, authenticated transport to model pods (TLS sidecar)", func() {
+		const (
+			md        = "e2e-podtls"
+			podServer = "default.model.amphora.internal"
+			proxyHost = "http://proxy-podtls.amphora-system.svc:8080/"
+		)
+		curlPodDirect := func(pod, secret, ip string, curlArgs ...string) (string, error) {
+			args := append([]string{"-sS", "-m", "10", "--cacert", "/c/ca.crt",
+				"--resolve", fmt.Sprintf("%s:8443:%s", podServer, ip)}, curlArgs...)
+			return curlTLS(pod, secret, append(args, "https://"+podServer+":8443/health")...)
+		}
+
+		BeforeAll(func() {
+			ca, err := newTestCA("e2e-pod-ca")
+			Expect(err).NotTo(HaveOccurred())
+			srvCert, srvKey, err := ca.issue(podServer, x509.ExtKeyUsageServerAuth, podServer)
+			Expect(err).NotTo(HaveOccurred())
+			client := func(cn string) map[string][]byte {
+				cert, key, err := ca.issue(cn, x509.ExtKeyUsageClientAuth)
+				Expect(err).NotTo(HaveOccurred())
+				return map[string][]byte{keyTLSCrt: cert, keyTLSKey: key, keyCACrt: ca.PEM}
+			}
+			apply(secretManifest("amphora-model-tls", nsDefault, map[string][]byte{
+				keyTLSCrt: srvCert, keyTLSKey: srvKey, keyCACrt: ca.PEM,
+			}) + "---\n" +
+				secretManifest("e2e-controller-client", systemNS, client("amphora-controller")) + "---\n" +
+				secretManifest("e2e-proxy-client", systemNS, client("amphora-proxy")) + "---\n" +
+				// What a test caller in the default namespace presents when
+				// connecting to a pod directly.
+				secretManifest("podtls-caller-proxy", nsDefault, client("amphora-proxy")) + "---\n" +
+				secretManifest("podtls-caller-stranger", nsDefault, client("some-other-workload")) + "---\n" +
+				secretManifest("podtls-caller-none", nsDefault, map[string][]byte{keyCACrt: ca.PEM}))
+
+			By("turning on the sidecar in the manager")
+			kubectl("patch", "deploy/manager", "-n", systemNS, "--type=json", "-p", `[
+ {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--pod-tls-sidecar-image=amphora-podtls:e2e"},
+ {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--pod-client-cert=/pod-tls/tls.crt"},
+ {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--pod-client-key=/pod-tls/tls.key"},
+ {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--pod-ca=/pod-tls/ca.crt"},
+ {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-",
+  "value":{"name":"pod-tls","mountPath":"/pod-tls","readOnly":true}},
+ {"op":"add","path":"/spec/template/spec/volumes/-",
+  "value":{"name":"pod-tls","secret":{"secretName":"e2e-controller-client"}}}
+]`)
+			kubectl("rollout", "status", "deploy/manager", "-n", systemNS, "--timeout=180s")
+			waitForAdmission()
+
+			By("a proxy that reaches pods over mutual TLS")
+			apply(`apiVersion: apps/v1
+kind: Deployment
+metadata: {name: proxy-podtls, namespace: amphora-system}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: proxy-podtls}}
+  template:
+    metadata: {labels: {app: proxy-podtls}}
+    spec:
+      serviceAccountName: proxy
+      containers:
+      - name: proxy
+        image: amphora-proxy:e2e
+        imagePullPolicy: IfNotPresent
+        args:
+        - -sync-from-cluster
+        - -deferral-timeout=20s
+        - -upstream-client-cert=/up/tls.crt
+        - -upstream-client-key=/up/tls.key
+        - -upstream-ca=/up/ca.crt
+        ports: [{containerPort: 8080}]
+        volumeMounts: [{name: up, mountPath: /up, readOnly: true}]
+      volumes: [{name: up, secret: {secretName: e2e-proxy-client}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: proxy-podtls, namespace: amphora-system}
+spec:
+  selector: {app: proxy-podtls}
+  ports: [{port: 8080, targetPort: 8080}]
+`)
+			kubectl("rollout", "status", "deploy/proxy-podtls", "-n", systemNS, "--timeout=120s")
+		})
+
+		AfterAll(func() {
+			deleteAndWait(kindMD, md)
+			_, _ = kubectlTry(verbDelete, "networkpolicy", "amphora-model-pod-ingress", "-n", nsDefault, "--ignore-not-found")
+			_, _ = kubectlTry(verbDelete, "ns", "podtls-nosecret", "--ignore-not-found", "--wait=false")
+			_, _ = kubectlTry(verbDelete, "deploy,svc", "proxy-podtls", "-n", systemNS, "--ignore-not-found")
+			_, _ = kubectlTry("rollout", "undo", "deploy/manager", "-n", systemNS)
+			_, _ = kubectlTry("rollout", "status", "deploy/manager", "-n", systemNS, "--timeout=180s")
+			_, _ = kubectlTry(verbDelete, "secret", "e2e-controller-client", "e2e-proxy-client",
+				"-n", systemNS, "--ignore-not-found")
+			_, _ = kubectlTry(verbDelete, "secret", "amphora-model-tls", "podtls-caller-proxy", "podtls-caller-stranger",
+				"podtls-caller-none", "-n", nsDefault, "--ignore-not-found")
+		})
+
+		It("serves traffic through the sidecar, and the endpoint is https on the sidecar port only", func() {
+			apply(modelDeployment(md))
+			Eventually(func() string { return field(kindMD, md, "{.status.phase}") }, 4*time.Minute, 3*time.Second).
+				Should(Equal("Serving"))
+			Expect(field(kindMD, md, "{.status.endpoint}")).To(MatchRegexp(`^https://[0-9.]+:8443$`))
+			Expect(field(kindPod, md+"-serve", "{.spec.containers[*].name}")).To(Equal("model amphora-tls"))
+
+			out, err := curlPod("curl-podtls-proxied", 30, "-sS", "-m", "20",
+				"-H", "X-Amphora-Model: "+modelKeyPrefix+md, proxyHost)
+			Expect(err).NotTo(HaveOccurred(), out)
+			Expect(out).To(ContainSubstring("model=" + md))
+		})
+
+		It("authenticates callers at the sidecar: no certificate and an unlisted identity never reach the model", func() {
+			ip := field(kindPod, md+"-serve", "{.status.podIP}")
+			Expect(ip).NotTo(BeEmpty())
+
+			_, err := curlPodDirect("podtls-none", "podtls-caller-none", ip)
+			Expect(err).To(HaveOccurred(), "a caller with no client certificate was served")
+
+			out, err := curlPodDirect("podtls-stranger", "podtls-caller-stranger", ip,
+				"--cert", "/c/tls.crt", "--key", "/c/tls.key", "-o", "/dev/null", "-w", "%{http_code}")
+			Expect(err).NotTo(HaveOccurred(), out)
+			Expect(out).To(Equal("403"), "a valid certificate with an identity not on the allow-list")
+
+			out, err = curlPodDirect("podtls-proxy", "podtls-caller-proxy", ip,
+				"--cert", "/c/tls.crt", "--key", "/c/tls.key", "-o", "/dev/null", "-w", "%{http_code}")
+			Expect(err).NotTo(HaveOccurred(), out)
+			Expect(out).To(Equal("200"))
+		})
+
+		It("with the TLS-only policy, the plaintext model port and direct callers are unreachable", func() {
+			kubectl(verbApply, "-n", nsDefault, "-f", "../../config/podtls/tenant/model-pod-ingress-tls.yaml")
+			ip := field(kindPod, md+"-serve", "{.status.podIP}")
+			Eventually(func() error {
+				_, err := curlPod("podtls-plain-after", 10, "-sS", "-m", "5", "-o", "/dev/null",
+					fmt.Sprintf("http://%s:8000/health", ip))
+				return err
+			}, 60*time.Second, 2*time.Second).Should(HaveOccurred(), "the model's plaintext port is still reachable")
+
+			out, err := curlPod("curl-podtls-after-policy", 30, "-sS", "-m", "20",
+				"-H", "X-Amphora-Model: "+modelKeyPrefix+md, proxyHost)
+			Expect(err).NotTo(HaveOccurred(), out)
+			Expect(out).To(ContainSubstring("model=" + md))
+			deleteAndWait(kindMD, md)
+		})
+
+		It("fails closed in a namespace with no serving certificate: the pod never starts, so nothing is served", func() {
+			kubectl("create", "namespace", "podtls-nosecret")
+			apply(strings.Replace(modelDeployment("e2e-nosecret"), "namespace: default", "namespace: podtls-nosecret", 1))
+			Eventually(func() string {
+				return strings.TrimSpace(func() string {
+					out, _ := kubectlTry(verbGet, kindPod, "e2e-nosecret-serve", "-n", "podtls-nosecret",
+						"-o", "jsonpath={.status.phase}")
+					return out
+				}())
+			}, time.Minute, 2*time.Second).Should(Equal("Pending"))
+			Consistently(func() string {
+				out, _ := kubectlTry(verbGet, kindMD, "e2e-nosecret", "-n", "podtls-nosecret", "-o", "jsonpath={.status.phase}")
+				return out
+			}, 15*time.Second, 3*time.Second).ShouldNot(Equal("Serving"))
 		})
 	})
 })

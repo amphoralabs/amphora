@@ -69,7 +69,7 @@ gRPC link, so there is also no proxy → controller wakeup path yet (nothing sca
 ## What works today
 
 All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
-(`make test-e2e`, 20 specs, also run in CI):
+(`make test-e2e`, 24 specs, also run in CI):
 
 - **`ModelDeployment` CRD** (`amphora.amphora.sh/v1alpha1`) with an immutable `tenancyClass`
   (`SingleTenant` / `TrustedMultiTenant` / `RegulatedMultiTenant`), `gpuFraction` (MIG profile),
@@ -107,6 +107,16 @@ All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
   certificate gets `401`. The serving certificate is re-read on change, so cert-manager rotation
   needs no restart. `/healthz` and `/metrics` stay reachable without a client certificate.
   Without `-tls-client-ca` the proxy logs that the tenant header is client-asserted.
+- **Encrypted, authenticated transport to model pods** (opt-in, spec §5): with
+  `--pod-tls-sidecar-image`, every serving pod carries a small TLS-terminating sidecar
+  (`amphora-podtls`) that accepts only callers presenting a certificate from the cluster CA with an
+  allow-listed identity (the proxy and the controller), then forwards to the model on loopback and
+  streams responses unbuffered. The model image is untouched. The proxy and the controller's eval
+  gate reach pods over mutual TLS, verifying a per-tenant serving certificate
+  (`<namespace>.model.amphora.internal`) from the fixed-name Secret `amphora-model-tls` in each
+  tenant namespace, which cert-manager issues (`config/podtls`). A namespace without that Secret
+  fails closed: its pods stay in `ContainerCreating` instead of serving plaintext. Pair it with
+  `config/podtls/tenant/model-pod-ingress-tls.yaml` so only the sidecar port is reachable.
 - **Model-pod ingress policy**: `config/networkpolicy/model-pod-ingress.yaml` restricts connections
   to model pods to the `amphora-system` namespace, so a pod cannot bypass the proxy (and its
   identity checks, tagging and audit) by calling a model pod's IP directly. Apply it in every
@@ -130,12 +140,19 @@ All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
   spec are not implemented, and one shared deadline covers the health probe plus all canaries.
 - **Pools are single-namespace** and statically sized; there is no cross-namespace sharing and no
   predictive sizing.
-- **The proxy -> pod and controller -> pod hops are plaintext HTTP.** There is no in-transit
-  encryption or server authentication to model pods; the mitigation is the NetworkPolicy above
-  (which only helps where the CNI enforces it). Per-pod certificates are hard here because a
-  hijacked pod's spec is immutable after creation; this needs a service mesh or a sidecar and is
-  not built. The controller and scheduler share a process and proxy <-> controller goes through
-  the Kubernetes API, so there is no further internal hop to secure.
+- **Transport to model pods is plaintext unless the TLS sidecar is enabled** (it is opt-in and
+  needs cert-manager and a per-namespace serving certificate). With it, identity is **per tenant
+  namespace, not per pod**: a compromised pod holds its namespace's serving key and can impersonate
+  that tenant's other pods (never another tenant's, and the proxy only routes a tenant's models to
+  that tenant). It also adds a loopback hop and a small container per pod. The controller and
+  scheduler share a process and proxy <-> controller goes through the Kubernetes API, so there is
+  no further internal hop to secure.
+- **Scale-to-zero and a proxy -> controller wakeup are not built, by design.** The proxy never
+  calls the controller; it only watches `ModelDeployment` status. If scale-to-zero is added, a wakeup
+  should be signalled through the Kubernetes API (for example a field or annotation the controller
+  watches, written with a narrowly scoped RBAC rule) rather than a new network listener on the
+  controller: the API server already provides mutual TLS, authentication and authorization, and a
+  hand-built RPC channel would be a new spoofable endpoint ([#30](https://github.com/amphoralabs/amphora/issues/30)).
 - **Client authentication is certificate-only** (no OIDC or API keys), and the tenant must equal
   the model's namespace. A single client certificate cannot span several tenants.
 - The webhook's cert-manager certificate path is build-checked but not exercised in CI (the e2e
@@ -206,7 +223,8 @@ run it yourself.
   - [x] Residency enforcement against the node region label (#23)
   - [x] Client identity and mTLS at the proxy, plus model-pod ingress policy
         ([#10](https://github.com/amphoralabs/amphora/issues/10))
-  - [ ] Encrypted, authenticated proxy -> pod transport (mesh or sidecar; see limitations)
+  - [x] Encrypted, authenticated proxy -> pod and controller -> pod transport (TLS sidecar,
+        [#29](https://github.com/amphoralabs/amphora/issues/29))
 - [ ] **Phase 3** — Audit trail (WORM), eval/regression gate, multi-cluster orchestrator
   - [x] Eval gate: fail-closed health probe (#16) and exact-match canaries (#19)
   - [ ] Other matchers (embedding similarity, judge model), WORM audit trail, multi-cluster

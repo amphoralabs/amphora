@@ -30,7 +30,7 @@ import (
 
 func testMD(phase, endpoint string) *amphorav1alpha1.ModelDeployment {
 	return &amphorav1alpha1.ModelDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: tenantA},
+		ObjectMeta: metav1.ObjectMeta{Name: modelName, Namespace: tenantA},
 		Status:     amphorav1alpha1.ModelDeploymentStatus{Phase: phase, Endpoint: endpoint},
 	}
 }

@@ -38,11 +38,12 @@ import (
 )
 
 const (
-	tenantA  = "team-a"
-	tenantB  = "team-b"
-	modelA   = "team-a/llama"
-	modelB   = "team-b/llama"
-	cnServer = "proxy.test"
+	tenantA   = "team-a"
+	tenantB   = "team-b"
+	modelName = "llama"
+	modelA    = "team-a/llama"
+	modelB    = "team-b/llama"
+	cnServer  = "proxy.test"
 )
 
 // pki is a throwaway CA that can sign server and client certificates.

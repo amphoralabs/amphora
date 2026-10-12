@@ -1,0 +1,32 @@
+# Pin the sidecar image to the same release tag as the manager (the release
+# workflow publishes ghcr.io/<org>/amphora-podtls:<tag>); "latest" is only a
+# placeholder and is not published.
+#
+# Enables the TLS sidecar: the manager adds it to every serving pod and talks
+# to pods over mutual TLS with its client certificate.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --pod-tls-sidecar-image=ghcr.io/amphoralabs/amphora-podtls:latest
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --pod-client-cert=/pod-tls/tls.crt
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --pod-client-key=/pod-tls/tls.key
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --pod-ca=/pod-tls/ca.crt
+# Append (/-), never replace: the manager already mounts the webhook's
+# serving certificate.
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    name: pod-tls
+    mountPath: /pod-tls
+    readOnly: true
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: pod-tls
+    secret:
+      secretName: amphora-controller-client

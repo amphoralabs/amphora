@@ -97,6 +97,10 @@ type ModelDeploymentReconciler struct {
 	// mgr.GetAPIReader().
 	APIReader client.Reader
 
+	// PodTLS, when enabled, adds the TLS sidecar to cold-created pods and
+	// switches the endpoint and gate probes to https (spec §5).
+	PodTLS *PodTLSConfig
+
 	// restoreMu/restored make the one-time scheduler rebuild (ensureRestored)
 	// safe across concurrent reconciles. Zero values are ready to use.
 	restoreMu sync.Mutex

@@ -153,4 +153,36 @@ var _ = Describe("ModelDeployment placement survives a controller restart", func
 		}
 		_ = k8sClient.Delete(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: bigNode}})
 	})
+
+	It("serves a cold-created pod through the TLS sidecar when pod TLS is enabled", func() {
+		node(bigNode, "80000")
+		md := newMD("restart-tls")
+		prober := &fakeProber{}
+		r := &ModelDeploymentReconciler{
+			Client: k8sClient, Scheme: k8sClient.Scheme(), Scheduler: scheduler.NewScheduler(nil), EvalProber: prober,
+			PodTLS: &PodTLSConfig{SidecarImage: "example.com/amphora-podtls:test"},
+		}
+		reconcileN(r, md, 2)
+
+		var pod corev1.Pod
+		key := types.NamespacedName{Name: "restart-tls-serve", Namespace: testNamespace}
+		Expect(k8sClient.Get(ctx, key, &pod)).To(Succeed())
+		Expect(pod.Spec.Containers).To(HaveLen(2))
+		Expect(pod.Spec.Containers[0].Name).To(Equal("model"))
+		Expect(pod.Spec.Containers[1].Name).To(Equal("amphora-tls"))
+		Expect(pod.Spec.Volumes).To(HaveLen(1))
+		Expect(pod.Spec.Volumes[0].Secret.SecretName).To(Equal(DefaultPodTLSSecretName))
+
+		By("once Ready, the gate calls the sidecar over https and publishes that as the endpoint")
+		markPodReady(ctx, key)
+		reconcileN(r, md, 1)
+		Expect(prober.lastURL).To(Equal("https://10.0.0.7:8443/health"))
+		var got amphorav1alpha1.ModelDeployment
+		Expect(k8sClient.Get(ctx, md, &got)).To(Succeed())
+		Expect(got.Status.Phase).To(Equal(PhaseServing))
+		Expect(got.Status.Endpoint).To(Equal("https://10.0.0.7:8443"))
+
+		deleteAndFinalize(ctx, r, md)
+		_ = k8sClient.Delete(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: bigNode}})
+	})
 })

@@ -27,6 +27,9 @@ jobs:
           - component: proxy
             dockerfile: Dockerfile.proxy
             image_suffix: "-proxy"
+          - component: podtls
+            dockerfile: Dockerfile.podtls
+            image_suffix: "-podtls"
     env:
       IMAGE: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}
     steps:

@@ -60,7 +60,7 @@ type Canary struct {
 // CanaryRunner sends canaries to a serving pod and verifies the answers.
 // A nil error means every canary matched within ctx's deadline.
 type CanaryRunner interface {
-	Run(ctx context.Context, baseURL, model string, canaries []Canary) error
+	Run(ctx context.Context, base PodTarget, model string, canaries []Canary) error
 }
 
 // parseCanaries validates a canary ConfigMap: present key, valid JSON, 1 to
@@ -103,15 +103,18 @@ func (r *ModelDeploymentReconciler) loadCanaries(ctx context.Context, md *amphor
 // HTTPCanaryRunner implements CanaryRunner against an OpenAI-style
 // /v1/completions endpoint (what vLLM serves) with temperature 0.
 type HTTPCanaryRunner struct {
+	// Client is used for plaintext (http) targets; nil uses a default.
 	Client *http.Client
+	// TLS holds the client credentials for sidecar-protected (https) pods.
+	TLS *PodClientTLS
 }
 
 // Run implements CanaryRunner. Redirects are not followed and replies are
 // size-limited: the pod is untrusted until it passes.
-func (h *HTTPCanaryRunner) Run(ctx context.Context, baseURL, model string, canaries []Canary) error {
-	client := h.Client
-	if client == nil {
-		client = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+func (h *HTTPCanaryRunner) Run(ctx context.Context, base PodTarget, model string, canaries []Canary) error {
+	client, err := clientFor(h.Client, h.TLS, base)
+	if err != nil {
+		return err
 	}
 	for i, c := range canaries {
 		maxTokens := c.MaxTokens
@@ -122,7 +125,7 @@ func (h *HTTPCanaryRunner) Run(ctx context.Context, baseURL, model string, canar
 		if err != nil {
 			return err
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+canaryPath, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, base.URL+canaryPath, bytes.NewReader(body))
 		if err != nil {
 			return err
 		}

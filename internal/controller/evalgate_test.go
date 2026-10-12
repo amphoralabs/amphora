@@ -51,8 +51,8 @@ type fakeCanary struct {
 	got    []Canary
 }
 
-func (f *fakeCanary) Run(_ context.Context, baseURL, model string, canaries []Canary) error {
-	f.called, f.url, f.model, f.got = true, baseURL, model, canaries
+func (f *fakeCanary) Run(_ context.Context, base PodTarget, model string, canaries []Canary) error {
+	f.called, f.url, f.model, f.got = true, base.URL, model, canaries
 	return f.err
 }
 
@@ -62,8 +62,8 @@ type fakeProber struct {
 	lastURL string
 }
 
-func (f *fakeProber) Probe(ctx context.Context, url string) error {
-	f.lastURL = url
+func (f *fakeProber) Probe(ctx context.Context, target PodTarget) error {
+	f.lastURL = target.URL
 	if f.block {
 		<-ctx.Done()
 		return ctx.Err()
@@ -299,18 +299,18 @@ func TestHTTPEvalProber(t *testing.T) {
 	defer redirect.Close()
 
 	p := &HTTPEvalProber{}
-	if err := p.Probe(context.Background(), ok.URL); err != nil {
+	if err := p.Probe(context.Background(), PodTarget{URL: ok.URL}); err != nil {
 		t.Errorf("2xx probe = %v, want nil", err)
 	}
-	if err := p.Probe(context.Background(), bad.URL); err == nil {
+	if err := p.Probe(context.Background(), PodTarget{URL: bad.URL}); err == nil {
 		t.Error("5xx probe = nil, want error")
 	}
-	if err := p.Probe(context.Background(), redirect.URL); err == nil {
+	if err := p.Probe(context.Background(), PodTarget{URL: redirect.URL}); err == nil {
 		t.Error("redirect probe = nil, want error (redirects must not be followed)")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := p.Probe(ctx, ok.URL); err == nil {
+	if err := p.Probe(ctx, PodTarget{URL: ok.URL}); err == nil {
 		t.Error("cancelled-context probe = nil, want error")
 	}
 }
@@ -370,23 +370,23 @@ func TestHTTPCanaryRunner(t *testing.T) {
 	r := &HTTPCanaryRunner{}
 	ctx := context.Background()
 
-	if err := r.Run(ctx, srv.URL, "m", []Canary{{Prompt: mathPrompt, Expected: "4"}}); err != nil {
+	if err := r.Run(ctx, PodTarget{URL: srv.URL}, "m", []Canary{{Prompt: mathPrompt, Expected: "4"}}); err != nil {
 		t.Fatalf("matching canary (whitespace-trimmed) = %v, want nil", err)
 	}
 	if gotBody["model"] != "m" || gotBody["temperature"] != float64(0) || gotBody["max_tokens"] != float64(defaultCanaryMaxTokens) {
 		t.Errorf("request body = %v", gotBody)
 	}
 	for _, p := range []string{otherPrompt, "empty", "garbage", "500"} {
-		if err := r.Run(ctx, srv.URL, "m", []Canary{{Prompt: p, Expected: "4"}}); err == nil {
+		if err := r.Run(ctx, PodTarget{URL: srv.URL}, "m", []Canary{{Prompt: p, Expected: "4"}}); err == nil {
 			t.Errorf("prompt %q: Run = nil, want error", p)
 		}
 	}
-	if err := r.Run(ctx, srv.URL, "m", []Canary{{Prompt: mathPrompt, Expected: "4"}, {Prompt: otherPrompt, Expected: "4"}}); err == nil {
+	if err := r.Run(ctx, PodTarget{URL: srv.URL}, "m", []Canary{{Prompt: mathPrompt, Expected: "4"}, {Prompt: otherPrompt, Expected: "4"}}); err == nil {
 		t.Error("second canary mismatch must fail the whole run")
 	}
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
-	if err := r.Run(cctx, srv.URL, "m", []Canary{{Prompt: mathPrompt, Expected: "4"}}); err == nil {
+	if err := r.Run(cctx, PodTarget{URL: srv.URL}, "m", []Canary{{Prompt: mathPrompt, Expected: "4"}}); err == nil {
 		t.Error("cancelled context: Run = nil, want error")
 	}
 }

@@ -63,6 +63,11 @@ const (
 type PausePoolReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// PodTLS, when enabled, adds the TLS sidecar to pool pods. It must match
+	// the ModelDeploymentReconciler's: the sidecar and its Secret volume
+	// cannot be added to a pod after creation.
+	PodTLS *PodTLSConfig
 }
 
 //+kubebuilder:rbac:groups=amphora.amphora.sh,resources=pausepools,verbs=get;list;watch;create;update;patch;delete
@@ -214,7 +219,7 @@ func (r *PausePoolReconciler) listPoolPods(ctx context.Context, pool *amphorav1a
 func (r *PausePoolReconciler) growPool(ctx context.Context, pool *amphorav1alpha1.PausePool, count int) error {
 	var errs []error
 	for i := 0; i < count; i++ {
-		pod := newPausePod(pool)
+		pod := newPausePod(pool, r.PodTLS)
 		if err := controllerutil.SetControllerReference(pool, pod, r.Scheme); err != nil {
 			return fmt.Errorf("setting owner reference: %w", err)
 		}
@@ -249,9 +254,9 @@ func (r *PausePoolReconciler) shrinkPool(ctx context.Context, pods []corev1.Pod,
 // annotation — pod metadata is always mutable — then swaps the image, which
 // forces a container restart; the kubelet re-resolves the downward-API env
 // var against the pod's now-updated annotation at that restart.
-func newPausePod(pool *amphorav1alpha1.PausePool) *corev1.Pod {
+func newPausePod(pool *amphorav1alpha1.PausePool, podTLS *PodTLSConfig) *corev1.Pod {
 	nvidiaRuntimeClass := nvidiaRuntimeClassName
-	return &corev1.Pod{
+	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: pool.Name + "-pause-",
 			Namespace:    pool.Namespace,
@@ -290,6 +295,12 @@ func newPausePod(pool *amphorav1alpha1.PausePool) *corev1.Pod {
 			},
 		},
 	}
+	if podTLS.Enabled() {
+		// Pool pods front the default probe port; see readinessProbe.
+		pod.Spec.Containers = append(pod.Spec.Containers, podTLS.sidecar(defaultProbePort))
+		pod.Spec.Volumes = append(pod.Spec.Volumes, podTLS.volume())
+	}
+	return pod
 }
 
 // recordOutcome persists status.{currentSize,pausePodNames,observedGeneration}
