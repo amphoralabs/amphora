@@ -210,7 +210,7 @@ func TestDeferredRequestsAreBoundedPerModelAndInTotal(t *testing.T) {
 func TestApplyModelDeploymentTracksExistence(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reg := NewRegistry()
-	md := &amphorav1alpha1.ModelDeployment{ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: tenantA}}
+	md := &amphorav1alpha1.ModelDeployment{ObjectMeta: metav1.ObjectMeta{Name: modelName, Namespace: tenantA}}
 	md.Status.Phase = controller.PhaseWarming
 
 	ApplyModelDeployment(reg, md, logger)

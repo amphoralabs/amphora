@@ -115,7 +115,7 @@ func TestApplyModelDeploymentSetsServerNameForHTTPSEndpoints(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reg := NewRegistry()
 	md := &amphorav1alpha1.ModelDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: tenantA},
+		ObjectMeta: metav1.ObjectMeta{Name: modelName, Namespace: tenantA},
 		Status:     amphorav1alpha1.ModelDeploymentStatus{Phase: controller.PhaseServing, Endpoint: "https://10.0.0.5:8443"},
 	}
 	ApplyModelDeployment(reg, md, logger)

@@ -293,7 +293,7 @@ func (h *Handler) reverseProxyFor(target Target) *httputil.ReverseProxy {
 		return nil
 	}
 	rp := httputil.NewSingleHostReverseProxy(u)
-	if u.Scheme == "https" {
+	if u.Scheme == schemeHTTPS {
 		transport, err := h.cfg.UpstreamTLS.transport(target.ServerName)
 		if err != nil {
 			h.logger.Error("cannot reach https upstream", "upstream", target.Upstream, "error", err)

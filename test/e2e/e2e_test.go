@@ -36,6 +36,9 @@ const (
 	phaseFailed    = "Failed"
 	phaseSucceeded = "Succeeded"
 	keyName        = "name"
+	keyCACrt       = "ca.crt"
+	keyTLSCrt      = "tls.crt"
+	keyTLSKey      = "tls.key"
 	kubectlBin     = "kubectl"
 	verbGet        = "get"
 	verbDelete     = "delete"
@@ -706,14 +709,14 @@ subjects:
 				return s
 			}
 			manifest := secret("proxy-mtls-tls", systemNS, map[string][]byte{
-				"tls.crt": srvCert, "tls.key": srvKey, "ca.crt": ca.PEM,
+				keyTLSCrt: srvCert, keyTLSKey: srvKey, keyCACrt: ca.PEM,
 			})
 			for _, tenant := range []string{"default", "other"} {
 				cert, key, err := ca.issue(tenant, x509.ExtKeyUsageClientAuth)
 				Expect(err).NotTo(HaveOccurred())
 				// ca.crt here is what the client uses to verify the proxy.
 				manifest += "---\n" + secret("mtls-client-"+tenant, nsDefault, map[string][]byte{
-					"tls.crt": cert, "tls.key": key, "ca.crt": ca.PEM,
+					keyTLSCrt: cert, keyTLSKey: key, keyCACrt: ca.PEM,
 				})
 			}
 			manifest += `---
@@ -839,10 +842,10 @@ spec:
 			client := func(cn string) map[string][]byte {
 				cert, key, err := ca.issue(cn, x509.ExtKeyUsageClientAuth)
 				Expect(err).NotTo(HaveOccurred())
-				return map[string][]byte{"tls.crt": cert, "tls.key": key, "ca.crt": ca.PEM}
+				return map[string][]byte{keyTLSCrt: cert, keyTLSKey: key, keyCACrt: ca.PEM}
 			}
 			apply(secretManifest("amphora-model-tls", nsDefault, map[string][]byte{
-				"tls.crt": srvCert, "tls.key": srvKey, "ca.crt": ca.PEM,
+				keyTLSCrt: srvCert, keyTLSKey: srvKey, keyCACrt: ca.PEM,
 			}) + "---\n" +
 				secretManifest("e2e-controller-client", systemNS, client("amphora-controller")) + "---\n" +
 				secretManifest("e2e-proxy-client", systemNS, client("amphora-proxy")) + "---\n" +
@@ -850,7 +853,7 @@ spec:
 				// connecting to a pod directly.
 				secretManifest("podtls-caller-proxy", nsDefault, client("amphora-proxy")) + "---\n" +
 				secretManifest("podtls-caller-stranger", nsDefault, client("some-other-workload")) + "---\n" +
-				secretManifest("podtls-caller-none", nsDefault, map[string][]byte{"ca.crt": ca.PEM}))
+				secretManifest("podtls-caller-none", nsDefault, map[string][]byte{keyCACrt: ca.PEM}))
 
 			By("turning on the sidecar in the manager")
 			kubectl("patch", "deploy/manager", "-n", systemNS, "--type=json", "-p", `[

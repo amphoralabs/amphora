@@ -99,7 +99,7 @@ func (c *PodTLSConfig) sidecar(modelPort int32) corev1.Container {
 			fmt.Sprintf("-upstream=http://127.0.0.1:%d", modelPort),
 			fmt.Sprintf("-listen=:%d", PodTLSPort),
 		},
-		Ports: []corev1.ContainerPort{{Name: "amphora-tls", ContainerPort: PodTLSPort}},
+		Ports: []corev1.ContainerPort{{Name: podTLSSidecarName, ContainerPort: PodTLSPort}},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: podTLSVolumeName, MountPath: podTLSMountPath, ReadOnly: true},
 		},
