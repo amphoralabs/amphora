@@ -28,6 +28,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// deniedModelLabel replaces the client-controlled model name as the metric
+// label for requests rejected before routing.
+const deniedModelLabel = "-"
+
 // ModelHeader is the request header naming the target model. TenantHeader
 // optionally names the requesting tenant, propagated for cost/audit tagging
 // (§5 Repudiation: every request must be tagged with model/tenant/GPU-time/
@@ -50,6 +54,16 @@ type Config struct {
 	// cold model to become warm before failing with 503. Zero uses
 	// DefaultDeferralTimeout.
 	DeferralTimeout time.Duration
+
+	// RequireClientIdentity makes the handler take the tenant from the
+	// verified client certificate instead of trusting the X-Amphora-Tenant
+	// header, and only let a tenant reach its own models (spec §5: the
+	// header was previously client-asserted, so cost/audit tags and access
+	// were spoofable). Requests without a verified certificate get 401; a
+	// tenant asking for another tenant's model, or asserting a different
+	// tenant in the header, gets 403. Requires the listener to be configured
+	// with ServerTLSConfig and a client CA.
+	RequireClientIdentity bool
 }
 
 // Handler is the connection-deferral proxy PoC's HTTP entrypoint: it routes
@@ -124,6 +138,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		http.Error(w, "missing "+ModelHeader+" header", http.StatusBadRequest)
 		return
+	}
+
+	if h.cfg.RequireClientIdentity {
+		identity, ok := clientIdentity(r)
+		if !ok {
+			// The model label is client-controlled, so denied requests are
+			// not labeled with it (bounded metric cardinality).
+			h.requestsTotal.WithLabelValues(deniedModelLabel, "unauthenticated").Inc()
+			http.Error(w, "a verified client certificate is required", http.StatusUnauthorized)
+			return
+		}
+		// Same answer for "not yours" and "does not exist": a tenant cannot
+		// probe for other tenants' models.
+		if (tenant != "" && tenant != identity) || modelOwner(model) != identity {
+			h.requestsTotal.WithLabelValues(deniedModelLabel, "forbidden").Inc()
+			h.logger.Warn("denied request", "identity", identity, "asserted_tenant", tenant)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		tenant = identity
 	}
 
 	start := time.Now()

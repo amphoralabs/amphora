@@ -1,0 +1,35 @@
+# Restricts who can connect to model-serving pods (spec §5 Spoofing).
+#
+# Without this, any pod in the cluster can call a model pod's IP directly,
+# bypassing the proxy and with it tenant identity checks, request tagging and
+# the audit trail. This allows ingress only from the namespace the amphora
+# components (proxy, controller) run in.
+#
+# Apply it in EVERY namespace that contains ModelDeployments, e.g.:
+#   kubectl apply -n <tenant-namespace> -f config/networkpolicy/model-pod-ingress.yaml
+# It is not applied by the controller (that would need RBAC to create
+# NetworkPolicies in every tenant namespace). It only has effect if the
+# cluster's CNI enforces NetworkPolicy.
+#
+# It selects pods the controller has assigned to a deployment (they all carry
+# the amphora.amphora.sh/hijacked-by label). Idle pause-pool pods serve
+# nothing and are not selected. If amphora is installed in a namespace other
+# than amphora-system, change the namespaceSelector below.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: amphora-model-pod-ingress
+  labels:
+    app.kubernetes.io/name: amphora
+spec:
+  podSelector:
+    matchExpressions:
+    - key: amphora.amphora.sh/hijacked-by
+      operator: Exists
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: amphora-system

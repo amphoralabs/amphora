@@ -10,8 +10,7 @@ logged) EU AI Act-grade audit trail.
 > Status: **early development, not production-ready.** The control path works end to end on a
 > real Kubernetes cluster (admission, placement, pod assignment, quality gate, routing), but it
 > has only ever run against a GPU-less stub model: nothing here has been validated on real GPUs,
-> MIG, or large models yet, and the storage/streaming layer, mTLS, and the
-> audit trail are not built. See [What works today](#what-works-today) and the
+> MIG, or large models yet, and the storage/streaming layer and the audit trail are not built. See [What works today](#what-works-today) and the
 > [roadmap](#roadmap).
 
 ## Architecture
@@ -70,7 +69,7 @@ gRPC link, so there is also no proxy → controller wakeup path yet (nothing sca
 ## What works today
 
 All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
-(`make test-e2e`, 15 specs, also run in CI):
+(`make test-e2e`, 19 specs, also run in CI):
 
 - **`ModelDeployment` CRD** (`amphora.amphora.sh/v1alpha1`) with an immutable `tenancyClass`
   (`SingleTenant` / `TrustedMultiTenant` / `RegulatedMultiTenant`), `gpuFraction` (MIG profile),
@@ -98,6 +97,18 @@ All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
 - **Proxy** with connection deferral (requests for a not-yet-warm model are held open rather than
   failed), namespace-qualified model keys (`X-Amphora-Model: <namespace>/<name>`), and routing only
   to deployments that have passed the gate.
+- **Client identity at the proxy** (spec §5 Spoofing/Repudiation). With `-tls-cert`, `-tls-key` and
+  `-tls-client-ca`, callers must present a certificate signed by that CA. The tenant is taken from
+  the verified certificate's common name, not the `X-Amphora-Tenant` header, and a tenant may only
+  reach models in its own namespace (`<tenant>/<name>`): another tenant's model, a spoofed tenant
+  header, and a nonexistent model of another tenant all get the same `403`, and a caller with no
+  certificate gets `401`. The serving certificate is re-read on change, so cert-manager rotation
+  needs no restart. `/healthz` and `/metrics` stay reachable without a client certificate.
+  Without `-tls-client-ca` the proxy logs that the tenant header is client-asserted.
+- **Model-pod ingress policy**: `config/networkpolicy/model-pod-ingress.yaml` restricts connections
+  to model pods to the `amphora-system` namespace, so a pod cannot bypass the proxy (and its
+  identity checks, tagging and audit) by calling a model pod's IP directly. Apply it in every
+  namespace that holds `ModelDeployment`s; it is not applied by the controller.
 
 ## Known limitations
 
@@ -117,8 +128,16 @@ All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
   spec are not implemented, and one shared deadline covers the health probe plus all canaries.
 - **Pools are single-namespace** and statically sized; there is no cross-namespace sharing and no
   predictive sizing.
-- **No mTLS** between components, and the webhook's cert-manager certificate path is build-checked
-  but not exercised in CI (the e2e mints its own certificates).
+- **The proxy -> pod and controller -> pod hops are plaintext HTTP.** There is no in-transit
+  encryption or server authentication to model pods; the mitigation is the NetworkPolicy above
+  (which only helps where the CNI enforces it). Per-pod certificates are hard here because a
+  hijacked pod's spec is immutable after creation; this needs a service mesh or a sidecar and is
+  not built. The controller and scheduler share a process and proxy <-> controller goes through
+  the Kubernetes API, so there is no further internal hop to secure.
+- **Client authentication is certificate-only** (no OIDC or API keys), and the tenant must equal
+  the model's namespace. A single client certificate cannot span several tenants.
+- The webhook's cert-manager certificate path is build-checked but not exercised in CI (the e2e
+  mints its own certificates).
 - `config/default` is build-checked in CI but never deployed there (the e2e uses its own
   manifests and certificates), and the tag-triggered release workflow (manager and proxy images,
   signed, with SBOMs) has not been run yet.
@@ -183,8 +202,9 @@ run it yourself.
   - [x] Pause-pod pool (#13), hijack (#14), and cold-create fallback (#15)
   - [x] Admission webhooks for tenancy (#21; [#9](https://github.com/amphoralabs/amphora/issues/9))
   - [x] Residency enforcement against the node region label (#23)
-  - [ ] [mTLS between Proxy/Controller/Scheduler](https://github.com/amphoralabs/amphora/issues/10)
-        — `help wanted`
+  - [x] Client identity and mTLS at the proxy, plus model-pod ingress policy
+        ([#10](https://github.com/amphoralabs/amphora/issues/10))
+  - [ ] Encrypted, authenticated proxy -> pod transport (mesh or sidecar; see limitations)
 - [ ] **Phase 3** — Audit trail (WORM), eval/regression gate, multi-cluster orchestrator
   - [x] Eval gate: fail-closed health probe (#16) and exact-match canaries (#19)
   - [ ] Other matchers (embedding similarity, judge model), WORM audit trail, multi-cluster
