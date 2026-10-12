@@ -107,11 +107,12 @@ All of this is covered by unit/envtest tests and a kind-cluster end-to-end suite
   `topology.kubernetes.io/region`; without it, region-constrained deployments stay `Pending`.
   Eviction when a deployment drifts out of region is abrupt (no drain), and only
   `ModelDeployment` placement is covered (not failover across clusters, which does not exist yet).
-- **Scheduler state is in memory.** After a controller restart, running deployments are re-adopted
-  at the node their pod actually occupies (validated against the same tenancy, region and
-  capacity rules; one that no longer fits is evicted and re-placed), not recomputed from scratch.
-  Capacity is therefore only rebuilt as each deployment reconciles, and there is no leader-election
-  handoff of scheduler state between replicas.
+- **Scheduler state is in memory.** After a controller restart (or a new leader), the scheduler's
+  placements are rebuilt from the cluster before the first placement decision: every running
+  deployment is re-adopted at the node its pod actually occupies, validated against the same
+  tenancy, region and capacity rules, and one that no longer fits is evicted and re-placed. The
+  state itself is not persisted, so this relies on pod labels and node state being readable, and
+  there is no handoff of scheduler state between replicas.
 - **Quality checking is exact-match only.** Embedding-similarity and judge-model matchers from the
   spec are not implemented, and one shared deadline covers the health probe plus all canaries.
 - **Pools are single-namespace** and statically sized; there is no cross-namespace sharing and no

@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -127,5 +128,29 @@ var _ = Describe("ModelDeployment placement survives a controller restart", func
 		for _, n := range []string{bigNode, smallNode} {
 			_ = k8sClient.Delete(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: n}})
 		}
+	})
+
+	It("does not place a new deployment onto a running one's node just because it reconciles first", func() {
+		node(bigNode, "80000")
+		running := newMD("restart-running")
+		before := &ModelDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Scheduler: scheduler.NewScheduler(nil)}
+		reconcileN(before, running, 2)
+		Expect(podNode("restart-running")).To(Equal(bigNode))
+
+		By("the controller restarts; a NEW deployment is reconciled before the running one is")
+		restarted := &ModelDeploymentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Scheduler: scheduler.NewScheduler(nil)}
+		newcomer := newMD("restart-newcomer")
+		reconcileN(restarted, newcomer, 2)
+
+		var md amphorav1alpha1.ModelDeployment
+		Expect(k8sClient.Get(ctx, newcomer, &md)).To(Succeed())
+		Expect(md.Status.Phase).To(Equal(PhasePending), "the only node is occupied by a SingleTenant deployment")
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: "restart-newcomer-serve", Namespace: testNamespace}, &corev1.Pod{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "no pod may be created beside a live SingleTenant pod")
+
+		for _, n := range []types.NamespacedName{newcomer, running} {
+			deleteAndFinalize(ctx, restarted, n)
+		}
+		_ = k8sClient.Delete(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: bigNode}})
 	})
 })
