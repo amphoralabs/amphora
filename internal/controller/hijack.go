@@ -170,7 +170,7 @@ func (r *ModelDeploymentReconciler) findIdlePausePod(ctx context.Context, md *am
 		// take a pool pod that already holds exactly the GPU/CPU/memory it
 		// asked for. Silently handing it different resources would be worse
 		// than the slower cold-create path.
-		if !apiequality.Semantic.DeepEqual(pool.Spec.Resources, md.Spec.Resources) {
+		if !apiequality.Semantic.DeepEqual(resourcesOrEmpty(pool.Spec.Resources), resourcesOrEmpty(md.Spec.Resources)) {
 			log.FromContext(ctx).Info("skipping PausePool: its resources differ from the deployment's",
 				"pool", pool.Name, "model", md.Name)
 			continue
@@ -268,7 +268,7 @@ func (r *ModelDeploymentReconciler) coldCreatePod(ctx context.Context, md *ampho
 			Containers: []corev1.Container{{
 				Name:           "model",
 				Image:          md.Spec.Image,
-				Resources:      *md.Spec.Resources.DeepCopy(),
+				Resources:      resourcesOrEmpty(md.Spec.Resources),
 				ReadinessProbe: readinessProbe(probePortFor(md)),
 				Env: []corev1.EnvVar{
 					{Name: "AMPHORA_TENANCY_CLASS", Value: string(md.Spec.TenancyClass)},

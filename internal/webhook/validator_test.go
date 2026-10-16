@@ -230,13 +230,13 @@ func TestResourceValidation(t *testing.T) {
 func TestResourcesAreValidatedOnBothKinds(t *testing.T) {
 	bad := corev1.ResourceRequirements{Requests: rl("nvidia.com/gpu", "1")}
 	_, err := (&ModelDeploymentValidator{}).ValidateCreate(context.Background(), md(amphorav1alpha1.ModelDeploymentSpec{
-		Image: testImage, TenancyClass: amphorav1alpha1.TenancySingleTenant, Resources: bad,
+		Image: testImage, TenancyClass: amphorav1alpha1.TenancySingleTenant, Resources: &bad,
 	}))
 	if err == nil || !strings.Contains(err.Error(), "spec.resources") {
 		t.Errorf("ModelDeployment with invalid resources: %v", err)
 	}
 	pool := &amphorav1alpha1.PausePool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"},
-		Spec: amphorav1alpha1.PausePoolSpec{NodeName: "n", TenancyClass: amphorav1alpha1.TenancySingleTenant, GPUSlice: "full", Resources: bad}}
+		Spec: amphorav1alpha1.PausePoolSpec{NodeName: "n", TenancyClass: amphorav1alpha1.TenancySingleTenant, GPUSlice: "full", Resources: &bad}}
 	if _, err := (&PausePoolValidator{}).ValidateCreate(context.Background(), pool); err == nil || !strings.Contains(err.Error(), "spec.resources") {
 		t.Errorf("PausePool with invalid resources: %v", err)
 	}
@@ -262,14 +262,14 @@ func TestMissingGPUResourceWarnsWhereItMatters(t *testing.T) {
 	if got := md2(s); !strings.Contains(got, "placement policy only") {
 		t.Errorf("gpuFraction without a GPU resource must warn that nothing is allocated: %q", got)
 	}
-	s.Resources = withGPU
+	s.Resources = &withGPU
 	if got := md2(s); strings.Contains(got, "no GPU or MIG resource") {
 		t.Errorf("a spec that requests the GPU must not warn: %q", got)
 	}
 
 	pool := func(rr corev1.ResourceRequirements) string {
 		p := &amphorav1alpha1.PausePool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"},
-			Spec: amphorav1alpha1.PausePoolSpec{NodeName: "n", TenancyClass: amphorav1alpha1.TenancySingleTenant, GPUSlice: "full", Resources: rr}}
+			Spec: amphorav1alpha1.PausePoolSpec{NodeName: "n", TenancyClass: amphorav1alpha1.TenancySingleTenant, GPUSlice: "full", Resources: &rr}}
 		w, err := (&PausePoolValidator{}).ValidateCreate(ctx, p)
 		if err != nil {
 			t.Fatalf("unexpected rejection: %v", err)

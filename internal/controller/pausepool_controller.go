@@ -280,7 +280,7 @@ func newPausePod(pool *amphorav1alpha1.PausePool, podTLS *PodTLSConfig) *corev1.
 				{
 					Name:      "pause",
 					Image:     pool.Spec.PauseImage,
-					Resources: *pool.Spec.Resources.DeepCopy(),
+					Resources: resourcesOrEmpty(pool.Spec.Resources),
 					// Idle pause pods are deliberately NotReady (the pause
 					// image serves nothing); they become Ready only after a
 					// hijack swaps in a server. Port is the default probe

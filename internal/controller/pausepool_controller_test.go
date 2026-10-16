@@ -67,7 +67,7 @@ var _ = Describe("PausePool Controller", func() {
 					TenancyClass: amphorav1alpha1.TenancyRegulatedMultiTenant,
 					GPUSlice:     "1g.10gb",
 					TargetSize:   2,
-					PauseImage:   "registry.k8s.io/pause:3.9",
+					PauseImage:   testPauseImage,
 				},
 			}
 			Expect(k8sClient.Create(ctx, pool)).To(Succeed())
@@ -93,7 +93,7 @@ var _ = Describe("PausePool Controller", func() {
 			Expect(pods).To(HaveLen(2))
 			for _, p := range pods {
 				Expect(p.Spec.NodeName).To(Equal(nodeName))
-				Expect(p.Spec.Containers[0].Image).To(Equal("registry.k8s.io/pause:3.9"))
+				Expect(p.Spec.Containers[0].Image).To(Equal(testPauseImage))
 				Expect(p.Labels[pausePodTenancyLabel]).To(Equal(string(amphorav1alpha1.TenancyRegulatedMultiTenant)))
 			}
 
@@ -101,7 +101,7 @@ var _ = Describe("PausePool Controller", func() {
 			Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
 			Expect(updated.Status.CurrentSize).To(Equal(int32(2)))
 			Expect(updated.Status.PausePodNames).To(HaveLen(2))
-			readyCond := findCondition(updated.Status.Conditions, conditionReady)
+			readyCond := findReady(updated.Status.Conditions)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 			Expect(readyCond.Reason).To(Equal(reasonPoolFilled))
@@ -166,7 +166,7 @@ var _ = Describe("PausePool Controller", func() {
 
 			var updated amphorav1alpha1.PausePool
 			Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
-			readyCond := findCondition(updated.Status.Conditions, conditionReady)
+			readyCond := findReady(updated.Status.Conditions)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(readyCond.Reason).To(Equal(reasonInvalidSpec))
@@ -225,7 +225,7 @@ var _ = Describe("PausePool Controller", func() {
 
 			var updated amphorav1alpha1.PausePool
 			Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
-			readyCond := findCondition(updated.Status.Conditions, conditionReady)
+			readyCond := findReady(updated.Status.Conditions)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(readyCond.Reason).To(Equal(reasonInvalidSpec))
@@ -233,9 +233,9 @@ var _ = Describe("PausePool Controller", func() {
 	})
 })
 
-func findCondition(conditions []metav1.Condition, condType string) *metav1.Condition {
+func findReady(conditions []metav1.Condition) *metav1.Condition {
 	for i := range conditions {
-		if conditions[i].Type == condType {
+		if conditions[i].Type == conditionReady {
 			return &conditions[i]
 		}
 	}

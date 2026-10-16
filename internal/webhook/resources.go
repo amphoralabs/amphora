@@ -106,3 +106,10 @@ func validateResources(path string, rr corev1.ResourceRequirements) []error {
 	}
 	return errs
 }
+
+func derefResources(rr *corev1.ResourceRequirements) corev1.ResourceRequirements {
+	if rr == nil {
+		return corev1.ResourceRequirements{}
+	}
+	return *rr
+}

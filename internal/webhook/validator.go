@@ -141,8 +141,8 @@ func validateModelDeployment(obj runtime.Object) (admission.Warnings, error) {
 		seen[region] = struct{}{}
 	}
 
-	errs = append(errs, validateResources("spec.resources", spec.Resources)...)
-	if !hasExtendedResource(spec.Resources) && (spec.GPUFraction != "" || spec.TenancyClass == amphorav1alpha1.TenancyRegulatedMultiTenant) {
+	errs = append(errs, validateResources("spec.resources", derefResources(spec.Resources))...)
+	if !hasExtendedResource(derefResources(spec.Resources)) && (spec.GPUFraction != "" || spec.TenancyClass == amphorav1alpha1.TenancyRegulatedMultiTenant) {
 		// gpuFraction and tenancyClass steer the Packing Scheduler; only a
 		// resource request makes Kubernetes allocate and isolate a device.
 		warnings = append(warnings, "spec.resources requests no GPU or MIG resource (for example nvidia.com/gpu): "+
@@ -209,9 +209,9 @@ func validatePausePool(obj runtime.Object) (admission.Warnings, error) {
 		errs = append(errs, fmt.Errorf("spec.gpuSlice %q for tenancyClass %s: %w", spec.GPUSlice, spec.TenancyClass, err))
 	}
 
-	errs = append(errs, validateResources("spec.resources", spec.Resources)...)
+	errs = append(errs, validateResources("spec.resources", derefResources(spec.Resources))...)
 	var warnings admission.Warnings
-	if !hasExtendedResource(spec.Resources) {
+	if !hasExtendedResource(derefResources(spec.Resources)) {
 		warnings = append(warnings, "spec.resources requests no GPU or MIG resource (for example nvidia.com/gpu): "+
 			"idle pods in this pool reserve no device, which is the point of a pool")
 	}

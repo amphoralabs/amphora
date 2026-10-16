@@ -108,7 +108,7 @@ type ModelDeploymentSpec struct {
 	// resources are identical, since a running pod's resources cannot change.
 	// Immutable after creation.
 	// +optional
-	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // ModelDeploymentStatus defines the observed state of ModelDeployment

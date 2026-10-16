@@ -36,7 +36,11 @@ import (
 	"github.com/ramin-fazli/amphora/internal/scheduler"
 )
 
-const gpuResource corev1.ResourceName = "example.com/gpu"
+const (
+	gpuResource    corev1.ResourceName = "example.com/gpu"
+	testPauseImage                     = "registry.k8s.io/pause:3.9"
+	coldPodE                           = "res-md-e-serve"
+)
 
 func gpuRequirements(n string) corev1.ResourceRequirements {
 	q := resource.MustParse(n)
@@ -118,7 +122,7 @@ var _ = Describe("Pod resources and finished pods", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
 			Spec: amphorav1alpha1.PausePoolSpec{
 				NodeName: nodeName, TenancyClass: amphorav1alpha1.TenancySingleTenant, GPUSlice: "full",
-				TargetSize: target, PauseImage: "registry.k8s.io/pause:3.9", Resources: rr,
+				TargetSize: target, PauseImage: testPauseImage, Resources: &rr,
 			},
 		})).To(Succeed())
 	}
@@ -127,7 +131,7 @@ var _ = Describe("Pod resources and finished pods", func() {
 		Expect(k8sClient.Create(ctx, &amphorav1alpha1.ModelDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
 			Spec: amphorav1alpha1.ModelDeploymentSpec{
-				Image: testImage, TenancyClass: amphorav1alpha1.TenancySingleTenant, Resources: rr,
+				Image: testImage, TenancyClass: amphorav1alpha1.TenancySingleTenant, Resources: &rr,
 			},
 		})).To(Succeed())
 	}
@@ -159,6 +163,19 @@ var _ = Describe("Pod resources and finished pods", func() {
 		p.Status.Message = "Node didn't have enough resource: " + string(gpuResource)
 		Expect(k8sClient.Status().Update(ctx, &p)).To(Succeed())
 	}
+
+	It("lets the controller update a deployment that sets no resources, but not change resources", func() {
+		newMD("res-md-imm", corev1.ResourceRequirements{})
+		var md amphorav1alpha1.ModelDeployment
+		Expect(k8sClient.Get(ctx, mdKey, &md)).To(Succeed())
+		md.Labels = map[string]string{"touched": "yes"}
+		Expect(k8sClient.Update(ctx, &md)).To(Succeed(), "a full-object update (as the controller does) must not trip the immutability rule")
+
+		md.Spec.Resources = &corev1.ResourceRequirements{Limits: corev1.ResourceList{gpuResource: resource.MustParse("1")}}
+		err := k8sClient.Update(ctx, &md)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("resources are immutable"))
+	})
 
 	It("gives pool pods exactly the pool's resources", func() {
 		newPool("res-pool-a", gpuRequirements("1"), 1)
@@ -219,7 +236,7 @@ var _ = Describe("Pod resources and finished pods", func() {
 		var pool amphorav1alpha1.PausePool
 		Expect(k8sClient.Get(ctx, poolKey, &pool)).To(Succeed())
 		Expect(pool.Status.CurrentSize).To(BeZero(), "a Failed pod is not capacity")
-		ready := findCondition(pool.Status.Conditions, conditionReady)
+		ready := findReady(pool.Status.Conditions)
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 		Expect(ready.Reason).To(Equal(reasonCapacityUnavailable))
@@ -257,7 +274,7 @@ var _ = Describe("Pod resources and finished pods", func() {
 
 		newMD("res-md-e", gpuRequirements("1"))
 		reconcileMD(2)
-		fail("res-md-e-serve", "OutOfexample.com/gpu")
+		fail(coldPodE, "OutOfexample.com/gpu")
 
 		res, err := mds.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
 		Expect(err).NotTo(HaveOccurred())
@@ -267,17 +284,17 @@ var _ = Describe("Pod resources and finished pods", func() {
 		Expect(md.Status.Phase).To(Equal(PhasePending), "a capacity problem, not a model that is warming or serving")
 		Expect(md.Status.EvalFailures).To(BeZero(), "a rejected pod is not a quality failure and must not trip the circuit breaker")
 		Expect(md.Status.Endpoint).To(BeEmpty())
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "res-md-e-serve", Namespace: testNamespace}, &corev1.Pod{})).To(Succeed(),
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: coldPodE, Namespace: testNamespace}, &corev1.Pod{})).To(Succeed(),
 			"kept as evidence during the backoff window")
 
 		By("after the window it is deleted and a fresh pod is created")
 		failedPodBackoff = 0
 		reconcileMD(1)
-		err = k8sClient.Get(ctx, types.NamespacedName{Name: "res-md-e-serve", Namespace: testNamespace}, &corev1.Pod{})
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: coldPodE, Namespace: testNamespace}, &corev1.Pod{})
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 		reconcileMD(1)
 		var fresh corev1.Pod
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "res-md-e-serve", Namespace: testNamespace}, &fresh)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: coldPodE, Namespace: testNamespace}, &fresh)).To(Succeed())
 		Expect(isTerminal(&fresh)).To(BeFalse())
 	})
 })

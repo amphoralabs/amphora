@@ -84,3 +84,11 @@ type podBackoffError struct {
 }
 
 func (e *podBackoffError) Error() string { return e.message }
+
+// resourcesOrEmpty returns a copy of rr, or empty requirements when unset.
+func resourcesOrEmpty(rr *corev1.ResourceRequirements) corev1.ResourceRequirements {
+	if rr == nil {
+		return corev1.ResourceRequirements{}
+	}
+	return *rr.DeepCopy()
+}
