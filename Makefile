@@ -136,6 +136,7 @@ test-e2e: kind
 # Installs the manifests that ship in config/ (config/samples/podtls) onto a throwaway kind
 # cluster with a real cert-manager (fetched from the network), and checks that it works. Slower
 # than test-e2e and needs network access; uses its own kubeconfig and refuses any other context.
+# DEPLOY_RELEASE_TAG=v0.1.0-alpha.1 installs the PUBLISHED images from ghcr.io instead of building them.
 DEPLOY_CLUSTER ?= amphora-deploy
 DEPLOY_KUBECONFIG ?= $(LOCALBIN)/deploy-kubeconfig
 
