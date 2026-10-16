@@ -167,8 +167,9 @@ manifests with a real cert-manager):
 ## Install
 
 > Early development: this is the path `make test-deploy` exercises on a single-node kind cluster with
-> a stub model. It has not been run with the published release images (no release has been cut yet)
-> or on real GPUs.
+> a stub model. It has not been run with the published release images (the first pre-release is
+> `v0.1.0-alpha.1`) or on real GPUs. If pulling an image is denied, its GHCR package has not been made
+> public yet (a one-time maintainer step, see CONTRIBUTING).
 
 **Prerequisites**
 - [cert-manager](https://cert-manager.io) (the webhook, and the optional TLS sidecar, get their
