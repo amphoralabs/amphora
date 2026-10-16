@@ -167,9 +167,9 @@ manifests with a real cert-manager):
 ## Install
 
 > Early development: this is the path `make test-deploy` exercises on a single-node kind cluster with
-> a stub model. It has not been run with the published release images (the first pre-release is
-> `v0.1.0-alpha.1`) or on real GPUs. If pulling an image is denied, its GHCR package has not been made
-> public yet (a one-time maintainer step, see CONTRIBUTING).
+> a stub model. It has been run against the published images of `v0.1.0-alpha.1` and
+> `v0.1.0-alpha.2`, and the release workflow now repeats it after publishing every tag. It has not
+> been run on real GPUs or a multi-node cluster. The current pre-release is `v0.1.0-alpha.2`.
 
 **Prerequisites**
 - [cert-manager](https://cert-manager.io) (the webhook, and the optional TLS sidecar, get their
@@ -181,24 +181,23 @@ manifests with a real cert-manager):
   creates request it.
 - Optional but recommended: a CNI that enforces `NetworkPolicy`.
 
-**1. Install the operator and proxy.** Reference the release you want (`v0.1.0` below is only an
-example version; the images are published to
+**1. Install the operator and proxy.** Reference the release you want (the images are published to
 `ghcr.io/amphoralabs/amphora`, `amphora-proxy` and `amphora-podtls`). Use `config/samples/podtls` for
 mutual TLS to model pods, or `config/default` for plaintext:
 
 ```yaml
 # kustomization.yaml
 resources:
-- https://github.com/amphoralabs/amphora//config/samples/podtls?ref=v0.1.0
+- https://github.com/amphoralabs/amphora//config/samples/podtls?ref=v0.1.0-alpha.2
 images:
-- {name: controller, newName: ghcr.io/amphoralabs/amphora, newTag: v0.1.0}
-- {name: proxy, newName: ghcr.io/amphoralabs/amphora-proxy, newTag: v0.1.0}
+- {name: controller, newName: ghcr.io/amphoralabs/amphora, newTag: v0.1.0-alpha.2}
+- {name: proxy, newName: ghcr.io/amphoralabs/amphora-proxy, newTag: v0.1.0-alpha.2}
 patches:
 - target: {kind: Deployment, labelSelector: control-plane=controller-manager}
   patch: |-
     - op: add
       path: /spec/template/spec/containers/0/args/-
-      value: --pod-tls-sidecar-image=ghcr.io/amphoralabs/amphora-podtls:v0.1.0
+      value: --pod-tls-sidecar-image=ghcr.io/amphoralabs/amphora-podtls:v0.1.0-alpha.2
 ```
 
 `kubectl apply -k .`, then wait for `deployment/amphora-controller-manager` and `deployment/amphora-proxy`
@@ -222,7 +221,7 @@ certificate's common name.
 Images are signed keyless with cosign and each release carries a CycloneDX SBOM per image:
 
 ```bash
-cosign verify ghcr.io/amphoralabs/amphora:v0.1.0 \
+cosign verify ghcr.io/amphoralabs/amphora:v0.1.0-alpha.2 \
   --certificate-identity-regexp 'https://github.com/amphoralabs/amphora/\.github/workflows/release\.yml@refs/tags/v.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
