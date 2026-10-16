@@ -114,3 +114,27 @@ jobs:
           generate_release_notes: true
           # A semver pre-release tag (v0.1.0-alpha.1) is a pre-release.
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # After publishing, install the images we just published, exactly as a user would
+  # (pulled from ghcr.io, not built here), and check they work: cert-manager issues
+  # the certificates, the webhook enforces the rules, and a model is served through
+  # the TLS sidecar. A failure here does not unpublish anything, but it tells us
+  # immediately that a release is broken instead of the first user finding out.
+  smoke:
+    needs: build-sign-publish
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Deploy test against the published images
+        env:
+          DEPLOY_RELEASE_TAG: ${{ github.ref_name }}
+        run: make test-deploy
+
