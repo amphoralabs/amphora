@@ -127,6 +127,19 @@ manifests with a real cert-manager):
 
 - **No real-GPU validation.** The e2e uses a stub model server and maps the `nvidia`
   RuntimeClass to `runc`. MIG, time-slicing, and vLLM behavior are untested.
+- **GPU packing is bookkeeping, not enforcement.** Serving pods set `runtimeClassName: nvidia` but
+  declare **no resources at all**: no `nvidia.com/gpu` or MIG resource, and no CPU or memory. The
+  NVIDIA device plugin only allocates a device to a pod that requests one, so Kubernetes does not
+  enforce the node, slice or isolation the Packing Scheduler decides on. Without CPU and memory
+  requests the pods are also `BestEffort`, the first evicted under node pressure. Adding resource
+  requests is not just a field: a pod's resources are immutable after creation, so for a hijacked
+  pool pod they would have to be declared on the `PausePool` and match the deployment.
+- **A model is configured entirely by its image.** `ModelDeployment` exposes only `image` (plus
+  tenancy, placement and gate settings): no command-line arguments, environment, volumes, resources
+  or service account. A hijacked pod's container spec is immutable, so these cannot be injected at
+  hijack time. A server such as vLLM therefore needs a derived image with its arguments and weights
+  baked in. Private registries work only through `imagePullSecrets` on the tenant namespace's
+  `default` ServiceAccount, which the pods use.
 - **Residency depends on node labels and is narrow.** Nodes must carry
   `topology.kubernetes.io/region`; without it, region-constrained deployments stay `Pending`.
   Eviction when a deployment drifts out of region is abrupt (no drain), and only
@@ -139,8 +152,9 @@ manifests with a real cert-manager):
   there is no handoff of scheduler state between replicas.
 - **Quality checking is exact-match only.** Embedding-similarity and judge-model matchers from the
   spec are not implemented, and one shared deadline covers the health probe plus all canaries.
-- **Pools are single-namespace** and statically sized; there is no cross-namespace sharing and no
-  predictive sizing.
+- **Pools are per-namespace by construction**, and statically sized. A Pod cannot move between
+  namespaces, so a pause pod created for one tenant can never be hijacked for another; size
+  `PausePool`s per tenant rather than expecting sharing. There is no predictive sizing.
 - **Transport to model pods is plaintext unless the TLS sidecar is enabled** (it is opt-in and
   needs cert-manager and a per-namespace serving certificate). With it, identity is **per tenant
   namespace, not per pod**: a compromised pod holds its namespace's serving key and can impersonate
@@ -322,8 +336,10 @@ a properly sized pool, and a regression test pins the reuse.
   - [x] Eval gate: fail-closed health probe (#16) and exact-match canaries (#19)
   - [ ] Other matchers (embedding similarity, judge model), WORM audit trail, multi-cluster
 - [ ] **Phase 4** — Cost-aware routing, predictive pre-warming, security review, GA hardening
-- [ ] **Not yet scheduled** — storage/streaming layer (NVMe → VRAM), real-GPU reference-hardware
-      benchmark, scale-to-zero and proxy → controller wakeup
+- [ ] **Not yet scheduled** — GPU, CPU and memory resource requests and container configuration for
+      serving pods (needs real-GPU validation and a MIG resource-naming decision), storage/streaming
+      layer (NVMe → VRAM), real-GPU reference-hardware benchmark, scale-to-zero and proxy → controller
+      wakeup
 
 Looking for something to pick up? Browse issues labeled
 [`good first issue`](https://github.com/amphoralabs/amphora/labels/good%20first%20issue) or
