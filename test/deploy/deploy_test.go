@@ -36,7 +36,31 @@ const (
 	tenantNS  = "tenant-a"
 	modelName = "deploy-model"
 	repoRoot  = "../.."
+
+	// publishedRegistry is where releases are published (see release.yml).
+	publishedRegistry = "ghcr.io/amphoralabs"
 )
+
+// releaseTag, when set (DEPLOY_RELEASE_TAG=v0.1.0-alpha.1), makes the suite
+// install the PUBLISHED images instead of building them from this checkout, so
+// the release artifacts themselves are what gets tested. The stub model is a
+// test fixture and is always built locally.
+var releaseTag = os.Getenv("DEPLOY_RELEASE_TAG")
+
+// imageRefs returns the manager, proxy and sidecar images under test.
+func imageRefs() (manager, proxy, podtls string) {
+	if releaseTag != "" {
+		return publishedRegistry + "/amphora:" + releaseTag,
+			publishedRegistry + "/amphora-proxy:" + releaseTag,
+			publishedRegistry + "/amphora-podtls:" + releaseTag
+	}
+	return "amphora-manager:deploy", "amphora-proxy:deploy", "amphora-podtls:deploy"
+}
+
+func splitRef(ref string) (name, tag string) {
+	i := strings.LastIndex(ref, ":")
+	return ref[:i], ref[i+1:]
+}
 
 func run(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput() // #nosec G204 -- test helper, fixed binaries
@@ -101,23 +125,26 @@ func overlay() string {
 	DeferCleanup(func() { _ = os.RemoveAll(dir) })
 	rel, err := filepath.Rel(dir, filepath.Join(repoRoot, "config", "samples", "podtls"))
 	Expect(err).NotTo(HaveOccurred())
+	managerRef, proxyRef, podtlsRef := imageRefs()
+	managerName, managerTag := splitRef(managerRef)
+	proxyName, proxyTag := splitRef(proxyRef)
 	kustomization := fmt.Sprintf(`resources:
 - %s
 images:
 - name: controller
-  newName: amphora-manager
-  newTag: deploy
+  newName: %s
+  newTag: %s
 - name: proxy
-  newName: amphora-proxy
-  newTag: deploy
+  newName: %s
+  newTag: %s
 patches:
 # A later --pod-tls-sidecar-image wins over the component's placeholder image.
 - target: {kind: Deployment, labelSelector: control-plane=controller-manager}
   patch: |-
     - op: add
       path: /spec/template/spec/containers/0/args/-
-      value: --pod-tls-sidecar-image=amphora-podtls:deploy
-`, rel)
+      value: --pod-tls-sidecar-image=%s
+`, rel, managerName, managerTag, proxyName, proxyTag, podtlsRef)
 	Expect(os.WriteFile(filepath.Join(dir, "kustomization.yaml"), []byte(kustomization), 0o600)).To(Succeed())
 	kustomize := os.Getenv("KUSTOMIZE")
 	if kustomize == "" {
@@ -140,11 +167,13 @@ var _ = BeforeSuite(func() {
 	if kind == "" {
 		kind = "kind"
 	}
-	images := map[string][]string{
-		"amphora-manager:deploy":   {"-f", "Dockerfile"},
-		"amphora-proxy:deploy":     {"-f", "Dockerfile.proxy"},
-		"amphora-podtls:deploy":    {"-f", "Dockerfile.podtls"},
-		"amphora-stubmodel:deploy": {"-f", "test/e2e/stubmodel/Dockerfile"},
+	images := map[string][]string{"amphora-stubmodel:deploy": {"-f", "test/e2e/stubmodel/Dockerfile"}}
+	if releaseTag == "" {
+		images["amphora-manager:deploy"] = []string{"-f", "Dockerfile"}
+		images["amphora-proxy:deploy"] = []string{"-f", "Dockerfile.proxy"}
+		images["amphora-podtls:deploy"] = []string{"-f", "Dockerfile.podtls"}
+	} else {
+		_, _ = fmt.Fprintf(GinkgoWriter, "installing PUBLISHED images at %s from %s\n", releaseTag, publishedRegistry)
 	}
 	for tag, file := range images {
 		cmd := exec.Command("docker", append([]string{"build", "-q", "-t", tag}, append(file, ".")...)...)
@@ -190,6 +219,13 @@ var _ = Describe("amphora installed from the shipped manifests with a real cert-
 		kubectl("wait", "--for=condition=Available", "deployment/amphora-controller-manager",
 			"-n", systemNS, "--timeout=300s")
 		kubectl("wait", "--for=condition=Available", "deployment/amphora-proxy", "-n", systemNS, "--timeout=300s")
+
+		By("the cluster is running the images we meant to test")
+		wantManager, wantProxy, _ := imageRefs()
+		Expect(jsonpath("deployment", "amphora-controller-manager", systemNS,
+			"{.spec.template.spec.containers[0].image}")).To(Equal(wantManager))
+		Expect(jsonpath("deployment", "amphora-proxy", systemNS,
+			"{.spec.template.spec.containers[0].image}")).To(Equal(wantProxy))
 
 		By("cert-manager issued every certificate the manifests ask for")
 		kubectl("wait", "--for=condition=Ready", "certificate", "--all", "-A", "--timeout=180s")
