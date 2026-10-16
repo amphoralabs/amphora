@@ -61,6 +61,29 @@ func (r *ModelDeploymentReconciler) runEvalGate(ctx context.Context, md *amphora
 		}
 		return ctrl.Result{}, err
 	}
+	if isTerminal(&pod) {
+		// The pod finished instead of starting (typically the kubelet rejected
+		// it because a requested resource was unavailable). This is a capacity
+		// problem, not a quality failure, so it does not count towards the
+		// circuit breaker. Keep it as evidence for the backoff window, then
+		// remove it so the next reconcile creates a fresh one.
+		if rem := failedPodBackoffRemaining(&pod); rem > 0 {
+			res, err := r.recordOutcome(ctx, md, PhasePending, string(placement.Mode), errors.New(podFailureMessage(&pod)))
+			if err != nil {
+				return res, err
+			}
+			return ctrl.Result{RequeueAfter: rem}, nil
+		}
+		if delErr := r.Delete(ctx, &pod, client.GracePeriodSeconds(0)); delErr != nil && !apierrors.IsNotFound(delErr) {
+			return ctrl.Result{}, delErr
+		}
+		md.Status.ActivePod = ""
+		res, err := r.recordOutcome(ctx, md, PhasePending, string(placement.Mode), errors.New(podFailureMessage(&pod)))
+		if err != nil {
+			return res, err
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	if !podReady(&pod) {
 		res, err := r.recordOutcome(ctx, md, PhaseWarming, string(placement.Mode), nil)
 		if err != nil {

@@ -113,6 +113,70 @@ spec:
                 description: PriorityClass governs preemption order among co-located
                   models on a shared GPU.
                 type: string
+              resources:
+                description: |-
+                  Resources are the resource requests and limits of the model container,
+                  used verbatim. This is what makes Kubernetes (and the NVIDIA device
+                  plugin) actually allocate a GPU or MIG slice: the Packing Scheduler's
+                  gpuFraction is placement policy, not a reservation. Name the extended
+                  resource your cluster exposes, for example "nvidia.com/gpu" or, with
+                  the mixed MIG strategy, "nvidia.com/mig-1g.10gb". Set limits equal to
+                  requests for every resource (and set cpu and memory) for Guaranteed QoS.
+
+                  A deployment hijacks an idle PausePool pod only when the pool's
+                  resources are identical, since a running pod's resources cannot change.
+                  Immutable after creation.
+                properties:
+                  claims:
+                    description: |-
+                      Claims lists the names of resources, defined in spec.resourceClaims,
+                      that are used by this container.
+
+                      This is an alpha field and requires enabling the
+                      DynamicResourceAllocation feature gate.
+
+                      This field is immutable. It can only be set for containers.
+                    items:
+                      description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                      properties:
+                        name:
+                          description: |-
+                            Name must match the name of one entry in pod.spec.resourceClaims of
+                            the Pod where this field is used. It makes that resource available
+                            inside a container.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  limits:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Limits describes the maximum amount of compute resources allowed.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                  requests:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Requests describes the minimum amount of compute resources required.
+                      If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                      otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                type: object
               tenancyClass:
                 description: |-
                   TenancyClass is immutable post-creation: downgrading isolation guarantees on a
@@ -130,6 +194,10 @@ spec:
             - image
             - tenancyClass
             type: object
+            x-kubernetes-validations:
+            - message: resources are immutable; delete and recreate to change them
+              rule: has(self.resources) == has(oldSelf.resources) && (!has(self.resources)
+                || self.resources == oldSelf.resources)
           status:
             description: ModelDeploymentStatus defines the observed state of ModelDeployment
             properties:

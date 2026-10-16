@@ -110,12 +110,15 @@ func (c *PodTLSConfig) sidecar(modelPort int32) corev1.Container {
 			PeriodSeconds: 2,
 		},
 		Resources: corev1.ResourceRequirements{
+			// Requests equal limits: a pod is only Guaranteed QoS (the last to be
+			// evicted, which is what a model pod holding GBs of weights wants)
+			// if EVERY container, including this one, has them equal.
 			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("20m"),
-				corev1.ResourceMemory: resource.MustParse("32Mi"),
+				corev1.ResourceCPU:    resource.MustParse("250m"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
 			},
 			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("500m"),
+				corev1.ResourceCPU:    resource.MustParse("250m"),
 				corev1.ResourceMemory: resource.MustParse("128Mi"),
 			},
 		},

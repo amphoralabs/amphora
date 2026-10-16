@@ -65,7 +65,7 @@ var _ = Describe("ModelDeployment pause-pod hijack", func() {
 					TenancyClass: amphorav1alpha1.TenancySingleTenant,
 					GPUSlice:     "full",
 					TargetSize:   1,
-					PauseImage:   "registry.k8s.io/pause:3.9",
+					PauseImage:   testPauseImage,
 				},
 			}
 			Expect(k8sClient.Create(ctx, pool)).To(Succeed())

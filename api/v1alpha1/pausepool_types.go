@@ -17,10 +17,12 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // PausePoolSpec defines the desired state of a pre-provisioned pause-pod pool
+// +kubebuilder:validation:XValidation:rule="has(self.resources) == has(oldSelf.resources) && (!has(self.resources) || self.resources == oldSelf.resources)",message="resources are immutable; delete and recreate to change them"
 // for a single (node, tenancyClass, gpuSlice) tuple. See Technical
 // Specification §3.2/§10 (pause-pod hijack) and
 // https://github.com/ramin-fazli/amphora/issues/12 for the design this
@@ -68,6 +70,15 @@ type PausePoolSpec struct {
 	// not at pool-fill time — this image is never expected to serve traffic.
 	// +kubebuilder:default="registry.k8s.io/pause:3.9"
 	PauseImage string `json:"pauseImage,omitempty"`
+
+	// Resources are the resource requests and limits of each idle pool pod's
+	// model container, used verbatim. This is what reserves the GPU or MIG
+	// slice while the pod is idle: the pod holds it until a deployment hijacks
+	// the pod, and the model then runs in that reservation. A deployment can
+	// hijack a pool pod only when its own spec.resources are identical, since a
+	// running pod's resources cannot change. Immutable after creation.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // PausePoolStatus defines the observed state of a PausePool.

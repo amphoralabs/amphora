@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -64,6 +65,7 @@ type EvalGateSpec struct {
 }
 
 // ModelDeploymentSpec defines the desired state of ModelDeployment
+// +kubebuilder:validation:XValidation:rule="has(self.resources) == has(oldSelf.resources) && (!has(self.resources) || self.resources == oldSelf.resources)",message="resources are immutable; delete and recreate to change them"
 type ModelDeploymentSpec struct {
 	// Image is the container image serving the model (e.g. a vLLM-based image).
 	// +kubebuilder:validation:Required
@@ -93,6 +95,20 @@ type ModelDeploymentSpec struct {
 
 	// EvalGate configures the pre-traffic-flip canary probe (§3.2.1).
 	EvalGate EvalGateSpec `json:"evalGate,omitempty"`
+
+	// Resources are the resource requests and limits of the model container,
+	// used verbatim. This is what makes Kubernetes (and the NVIDIA device
+	// plugin) actually allocate a GPU or MIG slice: the Packing Scheduler's
+	// gpuFraction is placement policy, not a reservation. Name the extended
+	// resource your cluster exposes, for example "nvidia.com/gpu" or, with
+	// the mixed MIG strategy, "nvidia.com/mig-1g.10gb". Set limits equal to
+	// requests for every resource (and set cpu and memory) for Guaranteed QoS.
+	//
+	// A deployment hijacks an idle PausePool pod only when the pool's
+	// resources are identical, since a running pod's resources cannot change.
+	// Immutable after creation.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // ModelDeploymentStatus defines the observed state of ModelDeployment

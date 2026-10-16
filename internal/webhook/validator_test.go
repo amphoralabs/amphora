@@ -18,10 +18,12 @@ package webhook
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	amphorav1alpha1 "github.com/ramin-fazli/amphora/api/v1alpha1"
@@ -183,5 +185,101 @@ func TestPausePoolValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func rl(kv ...string) corev1.ResourceList {
+	out := corev1.ResourceList{}
+	for i := 0; i+1 < len(kv); i += 2 {
+		out[corev1.ResourceName(kv[i])] = resource.MustParse(kv[i+1])
+	}
+	return out
+}
+
+func TestResourceValidation(t *testing.T) {
+	const gpu = "nvidia.com/gpu"
+	tests := []struct {
+		name    string
+		rr      corev1.ResourceRequirements
+		wantErr string // empty means valid
+	}{
+		{"nothing requested", corev1.ResourceRequirements{}, ""},
+		{"whole GPU limit only", corev1.ResourceRequirements{Limits: rl(gpu, "1")}, ""},
+		{"MIG slice, request equals limit", corev1.ResourceRequirements{Requests: rl("nvidia.com/mig-1g.10gb", "1"), Limits: rl("nvidia.com/mig-1g.10gb", "1")}, ""},
+		{"guaranteed cpu and memory with a GPU", corev1.ResourceRequirements{Requests: rl("cpu", "4", "memory", "16Gi"), Limits: rl("cpu", "4", "memory", "16Gi", gpu, "1")}, ""},
+		{"extended resource requested but not limited", corev1.ResourceRequirements{Requests: rl(gpu, "1")}, "must be set in limits"},
+		{"extended request differs from limit", corev1.ResourceRequirements{Requests: rl(gpu, "1"), Limits: rl(gpu, "2")}, "request and limit must be equal"},
+		{"fractional GPU", corev1.ResourceRequirements{Limits: rl(gpu, "500m")}, "whole number"},
+		{"cpu request above limit", corev1.ResourceRequirements{Requests: rl("cpu", "2"), Limits: rl("cpu", "1")}, "exceeds its limit"},
+		{"negative quantity", corev1.ResourceRequirements{Limits: rl("memory", "-1Gi")}, "must not be negative"},
+		{"malformed resource name", corev1.ResourceRequirements{Limits: rl("not a/valid name!", "1")}, "not a valid resource name"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := validateResources("spec.resources", tc.rr)
+			switch {
+			case tc.wantErr == "" && len(errs) > 0:
+				t.Fatalf("unexpected errors: %v", errs)
+			case tc.wantErr != "" && (len(errs) == 0 || !strings.Contains(errors.Join(errs...).Error(), tc.wantErr)):
+				t.Fatalf("errors %v, want containing %q", errs, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestResourcesAreValidatedOnBothKinds(t *testing.T) {
+	bad := corev1.ResourceRequirements{Requests: rl("nvidia.com/gpu", "1")}
+	_, err := (&ModelDeploymentValidator{}).ValidateCreate(context.Background(), md(amphorav1alpha1.ModelDeploymentSpec{
+		Image: testImage, TenancyClass: amphorav1alpha1.TenancySingleTenant, Resources: &bad,
+	}))
+	if err == nil || !strings.Contains(err.Error(), "spec.resources") {
+		t.Errorf("ModelDeployment with invalid resources: %v", err)
+	}
+	pool := &amphorav1alpha1.PausePool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"},
+		Spec: amphorav1alpha1.PausePoolSpec{NodeName: "n", TenancyClass: amphorav1alpha1.TenancySingleTenant, GPUSlice: "full", Resources: &bad}}
+	if _, err := (&PausePoolValidator{}).ValidateCreate(context.Background(), pool); err == nil || !strings.Contains(err.Error(), "spec.resources") {
+		t.Errorf("PausePool with invalid resources: %v", err)
+	}
+}
+
+func TestMissingGPUResourceWarnsWhereItMatters(t *testing.T) {
+	ctx := context.Background()
+	withGPU := corev1.ResourceRequirements{Limits: rl("nvidia.com/gpu", "1")}
+	md2 := func(spec amphorav1alpha1.ModelDeploymentSpec) string {
+		w, err := (&ModelDeploymentValidator{}).ValidateCreate(ctx, md(spec))
+		if err != nil {
+			t.Fatalf("unexpected rejection: %v", err)
+		}
+		return strings.Join(w, "|")
+	}
+	base := amphorav1alpha1.ModelDeploymentSpec{Image: testImage, TenancyClass: amphorav1alpha1.TenancySingleTenant}
+
+	if got := md2(base); strings.Contains(got, "no GPU or MIG resource") {
+		t.Errorf("a plain spec (a stub or CPU model) must not warn: %q", got)
+	}
+	s := base
+	s.GPUFraction = "1g.10gb"
+	if got := md2(s); !strings.Contains(got, "placement policy only") {
+		t.Errorf("gpuFraction without a GPU resource must warn that nothing is allocated: %q", got)
+	}
+	s.Resources = &withGPU
+	if got := md2(s); strings.Contains(got, "no GPU or MIG resource") {
+		t.Errorf("a spec that requests the GPU must not warn: %q", got)
+	}
+
+	pool := func(rr corev1.ResourceRequirements) string {
+		p := &amphorav1alpha1.PausePool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"},
+			Spec: amphorav1alpha1.PausePoolSpec{NodeName: "n", TenancyClass: amphorav1alpha1.TenancySingleTenant, GPUSlice: "full", Resources: &rr}}
+		w, err := (&PausePoolValidator{}).ValidateCreate(ctx, p)
+		if err != nil {
+			t.Fatalf("unexpected rejection: %v", err)
+		}
+		return strings.Join(w, "|")
+	}
+	if got := pool(corev1.ResourceRequirements{}); !strings.Contains(got, "reserve no device") {
+		t.Errorf("a pool that reserves nothing must warn: %q", got)
+	}
+	if got := pool(withGPU); got != "" {
+		t.Errorf("a pool that reserves a GPU must not warn: %q", got)
 	}
 }
