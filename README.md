@@ -164,6 +164,72 @@ manifests with a real cert-manager):
   with no real GPU. The tag-triggered release workflow (manager, proxy and podtls images, signed,
   with SBOMs) has not been run yet.
 
+## Install
+
+> Early development: this is the path `make test-deploy` exercises on a single-node kind cluster with
+> a stub model. It has not been run with the published release images (no release has been cut yet)
+> or on real GPUs.
+
+**Prerequisites**
+- [cert-manager](https://cert-manager.io) (the webhook, and the optional TLS sidecar, get their
+  certificates from it; tested with v1.21.2).
+- GPU nodes labeled `amphora.amphora.sh/gpu-vram-mb=<MiB>` (and `amphora.amphora.sh/gpu-mig-capable=true`
+  where MIG is available). Add the standard `topology.kubernetes.io/region` label if you use
+  `allowedRegions`: nodes without it never match a region-constrained deployment.
+- A `RuntimeClass` named `nvidia` (for example from the NVIDIA GPU Operator). Pods the controller
+  creates request it.
+- Optional but recommended: a CNI that enforces `NetworkPolicy`.
+
+**1. Install the operator and proxy.** Reference the release you want (`v0.1.0` below is only an
+example version; the images are published to
+`ghcr.io/amphoralabs/amphora`, `amphora-proxy` and `amphora-podtls`). Use `config/samples/podtls` for
+mutual TLS to model pods, or `config/default` for plaintext:
+
+```yaml
+# kustomization.yaml
+resources:
+- https://github.com/amphoralabs/amphora//config/samples/podtls?ref=v0.1.0
+images:
+- {name: controller, newName: ghcr.io/amphoralabs/amphora, newTag: v0.1.0}
+- {name: proxy, newName: ghcr.io/amphoralabs/amphora-proxy, newTag: v0.1.0}
+patches:
+- target: {kind: Deployment, labelSelector: control-plane=controller-manager}
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --pod-tls-sidecar-image=ghcr.io/amphoralabs/amphora-podtls:v0.1.0
+```
+
+`kubectl apply -k .`, then wait for `deployment/amphora-controller-manager` and `deployment/amphora-proxy`
+in `amphora-system` to become Available.
+
+**2. Prepare each tenant namespace** (only with the TLS sidecar). Pods mount a fixed-name Secret and
+stay in `ContainerCreating` until it exists:
+
+```bash
+NS=team-a
+sed "s/NAMESPACE/$NS/g" config/podtls/tenant/serving-certificate.yaml | kubectl apply -n "$NS" -f -
+kubectl apply -n "$NS" -f config/podtls/tenant/model-pod-ingress-tls.yaml   # or config/networkpolicy/ without TLS
+```
+
+**3. Deploy a model.** Create a `ModelDeployment` in the tenant namespace, then send requests to the
+`amphora-proxy` Service with `X-Amphora-Model: <namespace>/<name>`. For client authentication at the
+proxy, give it `-tls-cert`, `-tls-key` and `-tls-client-ca`; the tenant is then taken from the client
+certificate's common name.
+
+### Verifying a release
+Images are signed keyless with cosign and each release carries a CycloneDX SBOM per image:
+
+```bash
+cosign verify ghcr.io/amphoralabs/amphora:v0.1.0 \
+  --certificate-identity-regexp 'https://github.com/amphoralabs/amphora/\.github/workflows/release\.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Maintainers can check the release pipeline without publishing: **Actions -> Release -> Run workflow**
+builds all three images and their SBOMs but never pushes, signs, or creates a release. Publishing happens
+only when a `vX.Y.Z` tag is pushed.
+
 ## Try it
 
 Requires Go (see `go.mod`) and, for the end-to-end suite, Docker.
