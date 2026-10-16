@@ -21,9 +21,40 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
+	"time"
 )
+
+// Connection-pool sizing for upstream (model) connections. Go's default
+// transport keeps only 2 idle connections per host, so a model serving more
+// than 2 concurrent requests made the proxy close and reopen connections
+// constantly: 20-46% of requests at concurrency 4-64 opened a new upstream
+// connection (measured), each a full mutual-TLS handshake on the sidecar path.
+// Idle connections to one model are bounded by the per-model deferral cap
+// (DefaultMaxDeferredPerModel), so keep that many warm.
+const (
+	upstreamMaxIdlePerHost = 256
+	upstreamMaxIdle        = 1024
+	upstreamIdleTimeout    = 90 * time.Second
+)
+
+// newUpstreamTransport returns a transport tuned for a reverse proxy in front
+// of a handful of long-lived model servers. tlsCfg is nil for plaintext.
+func newUpstreamTransport(tlsCfg *tls.Config) *http.Transport {
+	return &http.Transport{
+		DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSClientConfig:     tlsCfg,
+		TLSHandshakeTimeout: 10 * time.Second,
+		MaxIdleConns:        upstreamMaxIdle,
+		MaxIdleConnsPerHost: upstreamMaxIdlePerHost,
+		IdleConnTimeout:     upstreamIdleTimeout,
+		// A proxy forwards bytes untouched: do not let the transport add
+		// Accept-Encoding and decompress model output on its own.
+		DisableCompression: true,
+	}
+}
 
 // UpstreamTLS holds the proxy's credentials for connecting to model pods
 // fronted by the TLS sidecar (spec §5). The client certificate is re-read on
@@ -54,19 +85,16 @@ func (u *UpstreamTLS) transport(serverName string) (*http.Transport, error) {
 	if !pool.AppendCertsFromPEM(pem) {
 		return nil, fmt.Errorf("upstream CA bundle %s contains no valid certificates", u.CAFile)
 	}
-	return &http.Transport{
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			RootCAs:    pool,
-			ServerName: serverName,
-			GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-				pair, err := tls.LoadX509KeyPair(u.CertFile, u.KeyFile)
-				if err != nil {
-					return nil, fmt.Errorf("loading proxy client certificate: %w", err)
-				}
-				return &pair, nil
-			},
+	return newUpstreamTransport(&tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    pool,
+		ServerName: serverName,
+		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			pair, err := tls.LoadX509KeyPair(u.CertFile, u.KeyFile)
+			if err != nil {
+				return nil, fmt.Errorf("loading proxy client certificate: %w", err)
+			}
+			return &pair, nil
 		},
-		ForceAttemptHTTP2: false,
-	}, nil
+	}), nil
 }

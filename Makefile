@@ -175,6 +175,10 @@ run: manifests generate fmt vet ## Run a controller from your host (webhooks off
 run-proxy: fmt vet ## Run the proxy from your host.
 	go run ./cmd/proxy
 
+.PHONY: bench-proxy
+bench-proxy: ## Measure warm-path proxy overhead against the spec's p99 < 15ms SLO (real TCP + TLS on loopback).
+	go test ./internal/proxy/ -run '^$$' -bench WarmPath -benchtime 20000x -cpu 4,16
+
 .PHONY: bench-coldstart
 bench-coldstart: fmt vet ## Run the Phase 1 concurrent cold-start benchmark (see benchmark/coldstart/README.md).
 	go run ./cmd/coldstart-bench -concurrency 1,4,8,16 -o-direct
