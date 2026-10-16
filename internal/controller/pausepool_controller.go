@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -107,10 +108,14 @@ func (r *PausePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("listing pause pods: %w", err)
 	}
-	// Pods with a non-nil DeletionTimestamp are terminating, not yet gone —
-	// treat them as already released rather than double-counting them as
-	// live capacity or re-deleting them on the next reconcile.
+	// Pods being deleted, and pods that already finished, are not capacity
+	// (see activePods). Finished pods are kept for a backoff window and
+	// nothing is created meanwhile, which bounds how fast a pod the kubelet
+	// keeps rejecting can be retried.
 	active := activePods(pods)
+	if wait, msg := r.handleFinishedPods(ctx, pods); wait > 0 {
+		return r.recordOutcomeAfter(ctx, &pool, active, reasonCapacityUnavailable, msg, wait)
+	}
 
 	switch diff := int(pool.Spec.TargetSize) - len(active); {
 	case diff > 0:
@@ -140,12 +145,13 @@ func (r *PausePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	return r.recordOutcome(ctx, &pool, active, metav1.ConditionTrue, reasonPoolFilled, fmt.Sprintf("%d/%d pause pods ready", len(active), pool.Spec.TargetSize))
 }
 
-// activePods filters out pods with a non-nil DeletionTimestamp (terminating,
-// but not yet removed by the garbage collector/kubelet).
+// activePods filters out pods that cannot serve: those being deleted (a
+// DeletionTimestamp, not yet removed by the garbage collector/kubelet) and
+// those that already finished (Failed/Succeeded, see podfailure.go).
 func activePods(pods []corev1.Pod) []corev1.Pod {
 	active := make([]corev1.Pod, 0, len(pods))
 	for _, p := range pods {
-		if p.DeletionTimestamp.IsZero() {
+		if p.DeletionTimestamp.IsZero() && !isTerminal(&p) {
 			active = append(active, p)
 		}
 	}
@@ -272,8 +278,9 @@ func newPausePod(pool *amphorav1alpha1.PausePool, podTLS *PodTLSConfig) *corev1.
 			RuntimeClassName: &nvidiaRuntimeClass,
 			Containers: []corev1.Container{
 				{
-					Name:  "pause",
-					Image: pool.Spec.PauseImage,
+					Name:      "pause",
+					Image:     pool.Spec.PauseImage,
+					Resources: *pool.Spec.Resources.DeepCopy(),
 					// Idle pause pods are deliberately NotReady (the pause
 					// image serves nothing); they become Ready only after a
 					// hijack swaps in a server. Port is the default probe
@@ -337,4 +344,32 @@ func (r *PausePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&amphorav1alpha1.PausePool{}).
 		Owns(&corev1.Pod{}).
 		Complete(r)
+}
+
+// handleFinishedPods deletes finished pool pods whose backoff window has
+// passed and reports how long to wait if any are still inside it (wait > 0,
+// with a message describing the failure). When wait is zero the caller may
+// proceed to create replacements.
+func (r *PausePoolReconciler) handleFinishedPods(ctx context.Context, pods []corev1.Pod) (wait time.Duration, msg string) {
+	for _, p := range terminalPods(pods) {
+		if rem := failedPodBackoffRemaining(&p); rem > 0 {
+			if rem > wait {
+				wait = rem
+			}
+			msg = podFailureMessage(&p)
+			continue
+		}
+		if err := r.Delete(ctx, &p, client.GracePeriodSeconds(0)); err != nil && !apierrors.IsNotFound(err) {
+			log.FromContext(ctx).Error(err, "deleting finished pause pod", "pod", p.Name)
+		}
+	}
+	return wait, msg
+}
+
+// recordOutcomeAfter records a not-Ready outcome and requeues after wait.
+func (r *PausePoolReconciler) recordOutcomeAfter(ctx context.Context, pool *amphorav1alpha1.PausePool, pods []corev1.Pod, reason, msg string, wait time.Duration) (ctrl.Result, error) {
+	if res, err := r.recordOutcome(ctx, pool, pods, metav1.ConditionFalse, reason, msg); err != nil {
+		return res, err
+	}
+	return ctrl.Result{RequeueAfter: wait}, nil
 }

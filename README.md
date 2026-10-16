@@ -127,13 +127,15 @@ manifests with a real cert-manager):
 
 - **No real-GPU validation.** The e2e uses a stub model server and maps the `nvidia`
   RuntimeClass to `runc`. MIG, time-slicing, and vLLM behavior are untested.
-- **GPU packing is bookkeeping, not enforcement.** Serving pods set `runtimeClassName: nvidia` but
-  declare **no resources at all**: no `nvidia.com/gpu` or MIG resource, and no CPU or memory. The
-  NVIDIA device plugin only allocates a device to a pod that requests one, so Kubernetes does not
-  enforce the node, slice or isolation the Packing Scheduler decides on. Without CPU and memory
-  requests the pods are also `BestEffort`, the first evicted under node pressure. Adding resource
-  requests is not just a field: a pod's resources are immutable after creation, so for a hijacked
-  pool pod they would have to be declared on the `PausePool` and match the deployment.
+- **GPU allocation is opt-in and unvalidated on real hardware.** `spec.resources` on `ModelDeployment`
+  and `PausePool` is passed verbatim to the model container (for example `nvidia.com/gpu: 1`, or
+  `nvidia.com/mig-1g.10gb: 1` with the mixed MIG strategy; use the name your GPU Operator exposes).
+  Without it the pods request nothing, `gpuFraction` is placement policy only, and the admission
+  webhook warns. Resources are immutable on a running pod, so a deployment hijacks a pool pod only
+  when the resources are identical; otherwise it cold-creates. Set requests equal to limits (and
+  cpu and memory) for Guaranteed QoS. A pod the kubelet rejects (resource unavailable) is kept 30s
+  as evidence, shown as `Pending`/not Ready, then replaced; it does not trip the eval-gate breaker.
+  Tested with a fake extended resource on envtest only; no real GPU or device plugin was involved.
 - **A model is configured entirely by its image.** `ModelDeployment` exposes only `image` (plus
   tenancy, placement and gate settings): no command-line arguments, environment, volumes, resources
   or service account. A hijacked pod's container spec is immutable, so these cannot be injected at
@@ -336,8 +338,7 @@ a properly sized pool, and a regression test pins the reuse.
   - [x] Eval gate: fail-closed health probe (#16) and exact-match canaries (#19)
   - [ ] Other matchers (embedding similarity, judge model), WORM audit trail, multi-cluster
 - [ ] **Phase 4** — Cost-aware routing, predictive pre-warming, security review, GA hardening
-- [ ] **Not yet scheduled** — GPU, CPU and memory resource requests and container configuration for
-      serving pods (needs real-GPU validation and a MIG resource-naming decision), storage/streaming
+- [ ] **Not yet scheduled** — container configuration (args, env, volumes) for serving pods, real-GPU validation of resource requests, storage/streaming
       layer (NVMe → VRAM), real-GPU reference-hardware benchmark, scale-to-zero and proxy → controller
       wakeup
 

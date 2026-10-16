@@ -213,6 +213,15 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		// No idle pod in any matching PausePool: degrade to a cold-created
 		// pod rather than leaving the deployment stuck (slower, but serves).
 		podName, err = r.coldCreatePod(ctx, &md, placement)
+		var backoff *podBackoffError
+		if errors.As(err, &backoff) {
+			// The previous pod failed (for example the kubelet could not
+			// provide a requested GPU). Retry after the backoff window.
+			if res, statusErr := r.recordOutcome(ctx, &md, PhasePending, string(placement.Mode), backoff); statusErr != nil {
+				return res, statusErr
+			}
+			return ctrl.Result{RequeueAfter: backoff.after}, nil
+		}
 		if err != nil {
 			return ctrl.Result{}, err
 		}

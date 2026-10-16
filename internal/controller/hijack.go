@@ -20,13 +20,16 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	amphorav1alpha1 "github.com/ramin-fazli/amphora/api/v1alpha1"
@@ -163,6 +166,15 @@ func (r *ModelDeploymentReconciler) findIdlePausePod(ctx context.Context, md *am
 		if err != nil || resolvedMode != placement.Mode {
 			continue
 		}
+		// A running pod's resources cannot change, so a deployment may only
+		// take a pool pod that already holds exactly the GPU/CPU/memory it
+		// asked for. Silently handing it different resources would be worse
+		// than the slower cold-create path.
+		if !apiequality.Semantic.DeepEqual(pool.Spec.Resources, md.Spec.Resources) {
+			log.FromContext(ctx).Info("skipping PausePool: its resources differ from the deployment's",
+				"pool", pool.Name, "model", md.Name)
+			continue
+		}
 		candidates = append(candidates, pool)
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Name < candidates[j].Name })
@@ -256,6 +268,7 @@ func (r *ModelDeploymentReconciler) coldCreatePod(ctx context.Context, md *ampho
 			Containers: []corev1.Container{{
 				Name:           "model",
 				Image:          md.Spec.Image,
+				Resources:      *md.Spec.Resources.DeepCopy(),
 				ReadinessProbe: readinessProbe(probePortFor(md)),
 				Env: []corev1.EnvVar{
 					{Name: "AMPHORA_TENANCY_CLASS", Value: string(md.Spec.TenancyClass)},
@@ -281,6 +294,18 @@ func (r *ModelDeploymentReconciler) coldCreatePod(ctx context.Context, md *ampho
 		}
 		if !existing.DeletionTimestamp.IsZero() {
 			return "", fmt.Errorf("cold-start pod %s still terminating; will retry", pod.Name)
+		}
+		if isTerminal(&existing) {
+			// The previous attempt was rejected or finished. Keep it as
+			// evidence for the backoff window; after that, remove it so the
+			// next reconcile creates a fresh one.
+			if rem := failedPodBackoffRemaining(&existing); rem > 0 {
+				return "", &podBackoffError{after: rem, message: podFailureMessage(&existing)}
+			}
+			if delErr := r.Delete(ctx, &existing, client.GracePeriodSeconds(0)); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return "", delErr
+			}
+			return "", &podBackoffError{after: time.Second, message: podFailureMessage(&existing) + " (replacing)"}
 		}
 		return pod.Name, nil
 	}
