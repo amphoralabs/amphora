@@ -69,6 +69,14 @@ jobs:
           push: ${{ env.PUBLISH == 'true' }}
           load: ${{ env.PUBLISH != 'true' }}
           tags: ${{ env.IMAGE }}:${{ env.VERSION }}
+          # The source label links the package to this repository (so it shows
+          # on the repo page and can inherit its permissions); revision ties an
+          # image to the exact commit it was built from.
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.licenses=Apache-2.0
 
       - name: Install cosign
         if: env.PUBLISH == 'true'
@@ -78,9 +86,22 @@ jobs:
         if: env.PUBLISH == 'true'
         run: cosign sign --yes ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
 
+      # Verify exactly what the README tells users to run. The signing step only
+      # proves cosign ran; this proves the signature is there and carries the
+      # identity consumers are told to expect.
+      - name: Verify the signature we just made
+        if: env.PUBLISH == 'true'
+        run: |
+          cosign verify "${IMAGE}:${VERSION}" \
+            --certificate-identity-regexp 'https://github.com/amphoralabs/amphora/\.github/workflows/release\.yml@refs/tags/v.*' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
         with:
+          # We attach the SBOM ourselves below under a stable per-component
+          # name; the action would otherwise upload a second copy.
+          upload-release-assets: false
           image: ${{ env.IMAGE }}:${{ env.VERSION }}
           format: cyclonedx-json
           output-file: sbom-${{ matrix.component }}.cyclonedx.json
@@ -91,3 +112,5 @@ jobs:
         with:
           files: sbom-${{ matrix.component }}.cyclonedx.json
           generate_release_notes: true
+          # A semver pre-release tag (v0.1.0-alpha.1) is a pre-release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
