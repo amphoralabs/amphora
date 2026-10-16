@@ -283,6 +283,29 @@ projection, but it's a lower bound on the full number, not the final one. See
 [`benchmark/coldstart/README.md`](benchmark/coldstart/README.md) for full methodology and how to
 run it yourself.
 
+### Proxy overhead
+
+Technical Specification §6 sets a warm-path routing target of **p99 < 15ms**. `make bench-proxy`
+measures the latency the proxy *adds* (a request through the proxy minus the same request sent
+straight to the upstream, at the same concurrency, over keep-alive loopback connections):
+
+| Scenario | Clients | Added p50 | Added p99 |
+|---|---|---|---|
+| Plain HTTP | 4 / 16 | ~45 / ~100 µs | ~0.3 / ~0.4-0.7 ms |
+| Client mTLS at the proxy (tenant from the certificate) | 4 / 16 | ~50 / ~95 µs | ~0.3 / ~0.45 ms |
+| Mutual TLS to the upstream (the TLS-sidecar path) | 4 / 16 | ~45 / ~85 µs | ~0.3 / ~0.4 ms |
+
+⚠️ These are single 20,000-request runs on a shared 22-core development machine where the load
+generator, proxy and upstream all share the CPU, so treat them as an order of magnitude, not a
+guarantee (the p99 varies between runs: plain HTTP at 16 clients was 0.4-0.7 ms across six). They
+exclude the sidecar's own loopback hop, model time, and any real network between nodes. They are
+nonetheless two orders of magnitude inside the target.
+
+Measuring this found a real defect: Go's default transport keeps only 2 idle connections per
+host, so with more than 2 concurrent requests per model the proxy opened a new upstream connection
+for 20-46% of requests (a full mutual-TLS handshake each on the sidecar path). The proxy now keeps
+a properly sized pool, and a regression test pins the reuse.
+
 ## Roadmap
 
 - [x] **Phase 1** — Operator/CRD skeleton, proxy PoC (#4), concurrent cold-start benchmarking (#5)

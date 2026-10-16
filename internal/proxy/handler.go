@@ -100,6 +100,10 @@ type Handler struct {
 
 	proxies sync.Map // upstream URL string -> *httputil.ReverseProxy
 
+	// plainTransport is shared by every plaintext upstream; one pool keyed by
+	// host is what keeps connections to a model warm.
+	plainTransport *http.Transport
+
 	deferMu         sync.Mutex
 	deferredTotal   int
 	deferredByModel map[string]int
@@ -131,6 +135,7 @@ func NewHandler(registry *Registry, notifier WakeupNotifier, cfg Config, reg pro
 	}
 
 	h := &Handler{
+		plainTransport:  newUpstreamTransport(nil),
 		deferredByModel: make(map[string]int),
 		registry:        registry,
 		notifier:        notifier,
@@ -293,6 +298,7 @@ func (h *Handler) reverseProxyFor(target Target) *httputil.ReverseProxy {
 		return nil
 	}
 	rp := httputil.NewSingleHostReverseProxy(u)
+	rp.Transport = h.plainTransport
 	if u.Scheme == schemeHTTPS {
 		transport, err := h.cfg.UpstreamTLS.transport(target.ServerName)
 		if err != nil {
