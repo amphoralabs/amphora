@@ -36,10 +36,11 @@ import (
 	"github.com/ramin-fazli/amphora/internal/scheduler"
 )
 
+const gpuResource corev1.ResourceName = "example.com/gpu"
+
 const (
-	gpuResource    corev1.ResourceName = "example.com/gpu"
-	testPauseImage                     = "registry.k8s.io/pause:3.9"
-	coldPodE                           = "res-md-e-serve"
+	testPauseImage = "registry.k8s.io/pause:3.9"
+	coldPodE       = "res-md-e-serve"
 )
 
 func gpuRequirements(n string) corev1.ResourceRequirements {
