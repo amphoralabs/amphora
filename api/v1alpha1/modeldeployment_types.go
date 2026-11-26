@@ -42,8 +42,9 @@ type EvalGateSpec struct {
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 
-	// TimeoutMillis is the gate deadline; on timeout the controller fails closed
-	// (traffic is not flipped, the swap is rolled back).
+	// TimeoutMillis is the deadline for the gate's health probe; on timeout the
+	// controller fails closed (traffic is not flipped, the swap is rolled back).
+	// Canary prompts have their own budget, CanaryTimeoutMillis.
 	// +kubebuilder:default=150
 	// +kubebuilder:validation:Minimum=1
 	TimeoutMillis int32 `json:"timeoutMillis,omitempty"`
@@ -59,9 +60,24 @@ type EvalGateSpec struct {
 	// whose "canaries.json" key is a JSON array of {prompt, expected, max_tokens?}.
 	// Honored only when Enabled is true. Each prompt is sent to the serving pod's
 	// /v1/completions (temperature 0, model = the ModelDeployment name) and must
-	// return exactly `expected` (whitespace-trimmed). TimeoutMillis bounds the
-	// health probe plus all canaries, so raise it from the 150ms default.
+	// return exactly `expected` (whitespace-trimmed). All canaries together must
+	// finish within CanaryTimeoutMillis.
 	CanaryConfigMapRef string `json:"canaryConfigMapRef,omitempty"`
+
+	// CanaryTimeoutMillis bounds all canary prompts together, after the health
+	// probe passes. Generating text takes far longer than a health check, so
+	// this is separate from TimeoutMillis. Exceeding it fails closed.
+	// +kubebuilder:default=10000
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=120000
+	CanaryTimeoutMillis int32 `json:"canaryTimeoutMillis,omitempty"`
+
+	// ServedModelName is the "model" value sent with canary prompts. Defaults
+	// to the ModelDeployment name. Set it when the serving image registers the
+	// model under another name (for example vLLM's --served-model-name).
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	ServedModelName string `json:"servedModelName,omitempty"`
 }
 
 // ModelDeploymentSpec defines the desired state of ModelDeployment
