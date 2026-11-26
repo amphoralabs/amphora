@@ -84,7 +84,7 @@ func (r *ModelDeploymentReconciler) runEvalGate(ctx context.Context, md *amphora
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	if !podReady(&pod) {
+	if !pod.DeletionTimestamp.IsZero() || !podReady(&pod) {
 		res, err := r.recordOutcome(ctx, md, PhaseWarming, string(placement.Mode), nil)
 		if err != nil {
 			return res, err
