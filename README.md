@@ -92,7 +92,9 @@ manifests with a real cert-manager):
   `amphora_controller_cold_create_fallbacks_total`.
 - **Eval gate** before any traffic flip: the pod must be Ready and pass a health probe within
   `timeoutMillis`, and, if `canaryConfigMapRef` is set, answer every canary prompt exactly as
-  expected (`/v1/completions`, exact match). It **fails closed**: a failed pod is deleted, and
+  expected (`/v1/completions`, exact match) within `canaryTimeoutMillis` (default 10s; set
+  `servedModelName` if the server registers the model under a name other than the deployment's).
+  It **fails closed**: a failed pod is deleted, and
   after 3 consecutive failures promotion pauses until an operator approves. Without canaries only
   latency is checked and `QualityVerified` stays `False`.
 - **Proxy** with connection deferral (requests for a model that exists but is not warm yet are held

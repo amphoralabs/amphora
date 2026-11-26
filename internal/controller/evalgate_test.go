@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -45,14 +46,22 @@ const (
 
 type fakeCanary struct {
 	err    error
+	delay  time.Duration // simulate generation time; honours the context deadline
 	called bool
 	url    string
 	model  string
 	got    []Canary
 }
 
-func (f *fakeCanary) Run(_ context.Context, base PodTarget, model string, canaries []Canary) error {
+func (f *fakeCanary) Run(ctx context.Context, base PodTarget, model string, canaries []Canary) error {
 	f.called, f.url, f.model, f.got = true, base.URL, model, canaries
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return f.err
 }
 
@@ -77,6 +86,13 @@ func markPodReady(ctx context.Context, key types.NamespacedName) {
 	pod.Status.PodIP = "10.0.0.7"
 	pod.Status.PodIPs = []corev1.PodIP{{IP: "10.0.0.7"}}
 	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	Expect(k8sClient.Status().Update(ctx, &pod)).To(Succeed())
+}
+
+func setPodReady(ctx context.Context, key types.NamespacedName, status corev1.ConditionStatus) {
+	var pod corev1.Pod
+	Expect(k8sClient.Get(ctx, key, &pod)).To(Succeed())
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: status}}
 	Expect(k8sClient.Status().Update(ctx, &pod)).To(Succeed())
 }
 
@@ -173,6 +189,56 @@ var _ = Describe("ModelDeployment eval gate", func() {
 		Expect(get().Status.Phase).To(Equal(PhaseServing))
 	})
 
+	It("stops routing to a Serving pod that becomes unready, and re-gates it on recovery", func() {
+		warm("eval-demote", 150)
+		markPodReady(ctx, podKey())
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(get().Status.Phase).To(Equal(PhaseServing))
+
+		By("the container crashes or fails its readiness probe")
+		setPodReady(ctx, podKey(), corev1.ConditionFalse)
+		prober.lastURL = ""
+		result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).NotTo(BeZero())
+		md := get()
+		Expect(md.Status.Phase).To(Equal(PhaseWarming))
+		Expect(md.Status.Endpoint).To(BeEmpty(), "the proxy must stop routing to an unready pod")
+		Expect(md.Status.ActivePod).To(Equal(podKey().Name), "the pod is kept, not rolled back")
+		Expect(md.Status.EvalFailures).To(BeZero(), "unreadiness is not a quality failure")
+		Expect(prober.lastURL).To(BeEmpty())
+
+		By("the pod recovers: it must pass the gate again before traffic returns")
+		setPodReady(ctx, podKey(), corev1.ConditionTrue)
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(prober.lastURL).To(Equal("http://10.0.0.7:8000/health"))
+		md = get()
+		Expect(md.Status.Phase).To(Equal(PhaseServing))
+		Expect(md.Status.Endpoint).To(Equal("http://10.0.0.7:8000"))
+	})
+
+	It("stops routing to a Serving pod that terminates", func() {
+		warm("eval-demote-failed", 150)
+		markPodReady(ctx, podKey())
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(get().Status.Phase).To(Equal(PhaseServing))
+
+		var pod corev1.Pod
+		Expect(k8sClient.Get(ctx, podKey(), &pod)).To(Succeed())
+		pod.Status.Phase = corev1.PodFailed
+		pod.Status.Reason = "OOMKilled"
+		Expect(k8sClient.Status().Update(ctx, &pod)).To(Succeed())
+
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
+		Expect(err).NotTo(HaveOccurred())
+		md := get()
+		Expect(md.Status.Phase).NotTo(Equal(PhaseServing))
+		Expect(md.Status.Endpoint).To(BeEmpty())
+	})
+
 	It("fails closed on a failed probe: rolls back the pod and counts the failure", func() {
 		warm("eval-fail", 150)
 		markPodReady(ctx, podKey())
@@ -206,6 +272,35 @@ var _ = Describe("ModelDeployment eval gate", func() {
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(cond.Reason).To(Equal(reasonCanaryPassed))
+	})
+
+	It("gives canaries their own time budget, separate from the health-probe deadline", func() {
+		putCanaries(`[{"prompt":"2+2=","expected":"4"}]`)
+		gate := canaryGate
+		gate.TimeoutMillis = 20 // health probe only
+		gate.CanaryTimeoutMillis = 2000
+		gate.ServedModelName = "org/served-name"
+		warmWithGate("eval-canary-budget", gate, true)
+		markPodReady(ctx, podKey())
+		canary.delay = 200 * time.Millisecond // far longer than the 20ms probe deadline
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(get().Status.Phase).To(Equal(PhaseServing))
+		Expect(canary.model).To(Equal("org/served-name"))
+	})
+
+	It("fails closed when canaries exceed their time budget", func() {
+		putCanaries(`[{"prompt":"2+2=","expected":"4"}]`)
+		gate := canaryGate
+		gate.CanaryTimeoutMillis = 50
+		warmWithGate("eval-canary-slow", gate, true)
+		markPodReady(ctx, podKey())
+		canary.delay = 2 * time.Second
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
+		Expect(err).NotTo(HaveOccurred())
+		md := get()
+		Expect(md.Status.Phase).To(Equal(PhaseRolledBack))
+		Expect(md.Status.Endpoint).To(BeEmpty())
 	})
 
 	It("rolls back and records CanaryFailed when a canary mismatches", func() {

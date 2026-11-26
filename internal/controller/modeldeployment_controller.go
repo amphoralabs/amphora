@@ -233,10 +233,33 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	logger.Info("pod assigned", "model", model, "pod", podName)
 	if md.Status.Phase == PhaseServing && md.Status.ActivePod == podName {
-		return ctrl.Result{}, nil // already promoted; don't re-gate every reconcile
+		healthy, err := r.servingPodHealthy(ctx, md.Namespace, podName)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if healthy {
+			return ctrl.Result{}, nil // already promoted; don't re-gate every reconcile
+		}
+		// The pod crashed, stopped passing readiness, finished, or is being
+		// deleted. Fall through to the gate: it clears status.endpoint (the
+		// proxy stops routing) and requires a fresh pass before traffic returns.
+		logger.Info("serving pod is no longer ready; demoting", "model", model, "pod", podName)
 	}
 	md.Status.ActivePod = podName
 	return r.runEvalGate(ctx, &md, placement)
+}
+
+// servingPodHealthy reports whether a promoted pod may keep receiving
+// traffic: it still exists, is not finished or being deleted, and is Ready.
+func (r *ModelDeploymentReconciler) servingPodHealthy(ctx context.Context, namespace, name string) (bool, error) {
+	var pod corev1.Pod
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &pod); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return pod.DeletionTimestamp.IsZero() && !isTerminal(&pod) && podReady(&pod), nil
 }
 
 // recordOutcome persists phase/effectivePackingMode/observedGeneration onto
