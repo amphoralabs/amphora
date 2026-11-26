@@ -25,6 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	amphorav1alpha1 "github.com/ramin-fazli/amphora/api/v1alpha1"
@@ -143,5 +144,53 @@ var _ = Describe("ModelDeployment residency (allowedRegions, spec §4.3)", func(
 		reconcileOnce()
 		Expect(podNode()).To(Equal(usNode))
 		Expect(get().Status.Phase).To(Equal(PhaseWarming))
+	})
+
+	It("re-checks a running deployment when its node is relabeled out of region, without any other event", func() {
+		regionNode(euNode, euWest1)
+		create("res-relabel", euWest1)
+		reconcileOnce()
+		reconcileOnce()
+		Expect(podNode()).To(Equal(euNode))
+
+		By("the node is relabeled into a region the deployment does not allow")
+		var node corev1.Node
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: euNode}, &node)).To(Succeed())
+		old := node.DeepCopy()
+		node.Labels[RegionLabel] = usEast1
+		Expect(k8sClient.Update(ctx, &node)).To(Succeed())
+		Expect(nodeLabelsChanged.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: &node})).To(BeTrue())
+
+		By("the node event maps to the deployment running there, and reconciling it evicts the pod")
+		reqs := reconciler.deploymentsForNode(ctx, &node)
+		Expect(reqs).To(ContainElement(reconcile.Request{NamespacedName: mdKey}))
+		for _, req := range reqs {
+			if req.NamespacedName == mdKey {
+				_, err := reconciler.Reconcile(ctx, req)
+				Expect(err).NotTo(HaveOccurred())
+			}
+		}
+		evicted := get()
+		Expect(evicted.Status.Phase).To(Equal(PhasePending))
+		Expect(evicted.Status.Endpoint).To(BeEmpty())
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: "res-relabel-serve", Namespace: testNamespace}, &corev1.Pod{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the out-of-region pod must be gone")
+	})
+
+	It("re-triggers a Pending deployment when a node gains an allowed region", func() {
+		regionNode(usNode, usEast1)
+		create("res-pending-wake", euWest1)
+		reconcileOnce()
+		reconcileOnce()
+		Expect(get().Status.Phase).To(Equal(PhasePending))
+
+		var node corev1.Node
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: usNode}, &node)).To(Succeed())
+		node.Labels[RegionLabel] = euWest1
+		Expect(k8sClient.Update(ctx, &node)).To(Succeed())
+
+		Expect(reconciler.deploymentsForNode(ctx, &node)).To(ContainElement(reconcile.Request{NamespacedName: mdKey}))
+		reconcileOnce()
+		Expect(podNode()).To(Equal(usNode))
 	})
 })

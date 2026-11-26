@@ -27,8 +27,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	amphorav1alpha1 "github.com/ramin-fazli/amphora/api/v1alpha1"
@@ -40,8 +42,9 @@ import (
 const schedulerFinalizer = "modeldeployment.amphora.amphora.sh/scheduler-release"
 
 // pendingRequeueInterval bounds how soon a capacity-starved ModelDeployment
-// is retried. Simple polling fallback in lieu of watching Node events to
-// eagerly re-trigger pending placements (follow-up work).
+// is retried. Node events re-trigger Pending deployments directly (see
+// deploymentsForNode); this poll is a fallback for capacity freed by other
+// deployments being deleted or rolled back.
 const pendingRequeueInterval = 30 * time.Second
 
 // Phases recorded in ModelDeploymentStatus.Phase. The field's doc comment
@@ -262,6 +265,12 @@ func (r *ModelDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&amphorav1alpha1.ModelDeployment{}).
 		Owns(&corev1.Pod{}).
+		// Node label changes (region, GPU capacity) must re-check the
+		// deployments on that node promptly: residency (§4.3) is enforced on
+		// reconcile, and nothing else triggers one for a healthy Serving
+		// deployment.
+		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.deploymentsForNode),
+			builder.WithPredicates(nodeLabelsChanged)).
 		Complete(r)
 }
 
