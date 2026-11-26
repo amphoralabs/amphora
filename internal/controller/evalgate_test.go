@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -45,14 +46,22 @@ const (
 
 type fakeCanary struct {
 	err    error
+	delay  time.Duration // simulate generation time; honours the context deadline
 	called bool
 	url    string
 	model  string
 	got    []Canary
 }
 
-func (f *fakeCanary) Run(_ context.Context, base PodTarget, model string, canaries []Canary) error {
+func (f *fakeCanary) Run(ctx context.Context, base PodTarget, model string, canaries []Canary) error {
 	f.called, f.url, f.model, f.got = true, base.URL, model, canaries
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return f.err
 }
 
@@ -263,6 +272,35 @@ var _ = Describe("ModelDeployment eval gate", func() {
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(cond.Reason).To(Equal(reasonCanaryPassed))
+	})
+
+	It("gives canaries their own time budget, separate from the health-probe deadline", func() {
+		putCanaries(`[{"prompt":"2+2=","expected":"4"}]`)
+		gate := canaryGate
+		gate.TimeoutMillis = 20 // health probe only
+		gate.CanaryTimeoutMillis = 2000
+		gate.ServedModelName = "org/served-name"
+		warmWithGate("eval-canary-budget", gate, true)
+		markPodReady(ctx, podKey())
+		canary.delay = 200 * time.Millisecond // far longer than the 20ms probe deadline
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(get().Status.Phase).To(Equal(PhaseServing))
+		Expect(canary.model).To(Equal("org/served-name"))
+	})
+
+	It("fails closed when canaries exceed their time budget", func() {
+		putCanaries(`[{"prompt":"2+2=","expected":"4"}]`)
+		gate := canaryGate
+		gate.CanaryTimeoutMillis = 50
+		warmWithGate("eval-canary-slow", gate, true)
+		markPodReady(ctx, podKey())
+		canary.delay = 2 * time.Second
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: mdKey})
+		Expect(err).NotTo(HaveOccurred())
+		md := get()
+		Expect(md.Status.Phase).To(Equal(PhaseRolledBack))
+		Expect(md.Status.Endpoint).To(BeEmpty())
 	})
 
 	It("rolls back and records CanaryFailed when a canary mismatches", func() {

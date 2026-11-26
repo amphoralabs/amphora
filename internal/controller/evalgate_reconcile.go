@@ -110,7 +110,9 @@ func (r *ModelDeploymentReconciler) runEvalGate(ctx context.Context, md *amphora
 	canary := md.Spec.EvalGate.Enabled && md.Spec.EvalGate.CanaryConfigMapRef != ""
 	if gateErr == nil && canary {
 		reason = reasonCanaryFailed
-		gateErr = r.runCanaries(probeCtx, md, base)
+		canaryCtx, cancelCanary := context.WithTimeout(ctx, canaryTimeoutFor(md))
+		gateErr = r.runCanaries(canaryCtx, md, base)
+		cancelCanary()
 	}
 	if gateErr != nil {
 		return r.failGate(ctx, md, &pod, placement, gateErr, reason)
@@ -146,7 +148,23 @@ func (r *ModelDeploymentReconciler) runCanaries(ctx context.Context, md *amphora
 	if err != nil {
 		return err
 	}
-	return r.CanaryRunner.Run(ctx, base, md.Name, canaries)
+	model := md.Spec.EvalGate.ServedModelName
+	if model == "" {
+		model = md.Name
+	}
+	return r.CanaryRunner.Run(ctx, base, model, canaries)
+}
+
+// defaultCanaryTimeout applies when spec.evalGate.canaryTimeoutMillis is unset
+// (objects created before the field existed, or the CRD default not applied).
+const defaultCanaryTimeout = 10 * time.Second
+
+// canaryTimeoutFor returns the budget for all of md's canary prompts together.
+func canaryTimeoutFor(md *amphorav1alpha1.ModelDeployment) time.Duration {
+	if ms := md.Spec.EvalGate.CanaryTimeoutMillis; ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
+	return defaultCanaryTimeout
 }
 
 // failGate is the fail-closed rollback: delete the pod, count the failure,
